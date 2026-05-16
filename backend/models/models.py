@@ -160,6 +160,11 @@ class Listing(Base):
 
     watchlist = relationship("Watchlist", back_populates="listings")
     deal_score = relationship("DealScore", back_populates="listing", uselist=False)
+    price_history = relationship(
+        "ListingPriceHistory",
+        back_populates="listing",
+        order_by="ListingPriceHistory.recorded_at",
+    )
 
     @property
     def raw_payload(self):
@@ -274,3 +279,30 @@ class AppSetting(Base):
     @value.setter
     def value(self, val):
         self.value_json = json.dumps(val)
+
+
+class ListingPriceHistory(Base):
+    __tablename__ = "listing_price_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    listing_id = Column(Integer, ForeignKey("listings.id"), nullable=False)
+    price = Column(Float, nullable=True)
+    recorded_at = Column(DateTime, default=now)
+
+    listing = relationship("Listing", back_populates="price_history")
+
+
+class MarketValueCache(Base):
+    __tablename__ = "market_value_cache"
+
+    id = Column(Integer, primary_key=True)
+    keyword = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=True)
+    median_price = Column(Float, nullable=True)
+    mean_price = Column(Float, nullable=True)
+    min_price = Column(Float, nullable=True)
+    max_price = Column(Float, nullable=True)
+    sample_count = Column(Integer, default=0)
+    source = Column(String, default="ebay_sold")
+    fetched_at = Column(DateTime, default=now)
+    expires_at = Column(DateTime, nullable=True)

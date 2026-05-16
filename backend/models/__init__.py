@@ -9,4 +9,6 @@ from .models import (
     GameCubePrice,
     TitleMapping,
     AppSetting,
+    ListingPriceHistory,
+    MarketValueCache,
 )
