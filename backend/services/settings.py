@@ -24,6 +24,7 @@ DEFAULTS = {
         "GOOD": 0.65,
         "FAIR": 0.75,
     },
+    "alert_batch_threshold": 3,
 }
 
 

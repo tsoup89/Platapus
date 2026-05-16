@@ -13,7 +13,9 @@ from backend.models import get_db
 from backend.models.models import (
     Watchlist, Source, ScraperRun, Listing, DealScore,
     DiscordWebhook, GameCubePrice, TitleMapping, AppSetting,
+    MarketValueCache,
 )
+from backend.services.market_value import get_market_value
 from backend.api.schemas import (
     WatchlistCreate, WatchlistUpdate, WatchlistOut,
     DiscordWebhookCreate, DiscordWebhookOut,
@@ -521,6 +523,62 @@ def confirm_title_mapping(
     db.commit()
     return {"ok": True}
 
+@router.post("/gamecube/sync-pricecharting")
+def sync_pricecharting(
+    max_titles: int = 50,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """Queue a PriceCharting sync in the background and return immediately."""
+    from backend.services.pricecharting import sync_gamecube_prices
+    from backend.models.database import SessionLocal
+
+    def _do_sync():
+        sync_db = SessionLocal()
+        try:
+            sync_gamecube_prices(sync_db, max_titles=max_titles)
+        finally:
+            sync_db.close()
+
+    if background_tasks:
+        background_tasks.add_task(_do_sync)
+        return {"ok": True, "message": f"PriceCharting sync queued for up to {max_titles} titles."}
+    return {"ok": False, "message": "No background task context available."}
+
+
+@router.get("/gamecube/sync-status")
+def get_sync_status(db: Session = Depends(get_db)):
+    """Return count of prices updated in last 48h and oldest price age."""
+    from datetime import timedelta
+
+    cutoff_48h = datetime.utcnow() - timedelta(hours=48)
+    updated_recently = (
+        db.query(GameCubePrice)
+        .filter(GameCubePrice.last_updated >= cutoff_48h)
+        .count()
+    )
+    total = db.query(GameCubePrice).count()
+    oldest = (
+        db.query(GameCubePrice)
+        .order_by(GameCubePrice.last_updated.asc().nullsfirst())
+        .first()
+    )
+    oldest_updated = oldest.last_updated.isoformat() if oldest and oldest.last_updated else None
+    stale_count = (
+        db.query(GameCubePrice)
+        .filter(
+            (GameCubePrice.last_updated == None)
+            | (GameCubePrice.last_updated < cutoff_48h)
+        )
+        .count()
+    )
+    return {
+        "total": total,
+        "updated_last_48h": updated_recently,
+        "stale_count": stale_count,
+        "oldest_updated": oldest_updated,
+    }
+
 
 # ─────────────────────────────────────────────────────────────
 # Settings
@@ -623,6 +681,72 @@ def rescore_gamecube(db: Session = Depends(get_db)):
 
     db.commit()
     return {"ok": True, "rescored": rescored, "message": f"Re-scored {rescored} GameCube listings."}
+
+
+# ─────────────────────────────────────────────────────────────
+# Market Value
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/market-value")
+def get_market_value_estimate(
+    keyword: str,
+    category: Optional[str] = None,
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    if refresh:
+        # Delete cached entry so get_market_value fetches fresh data
+        db.query(MarketValueCache).filter(
+            MarketValueCache.keyword == keyword,
+            MarketValueCache.category == category,
+        ).delete()
+        db.flush()
+
+    estimate = get_market_value(keyword=keyword, category=category, db=db)
+    return {
+        "keyword": estimate.keyword,
+        "median_price": estimate.median_price,
+        "mean_price": estimate.mean_price,
+        "min_price": estimate.min_price,
+        "max_price": estimate.max_price,
+        "sample_count": estimate.sample_count,
+        "source": estimate.source,
+        "fetched_at": estimate.fetched_at.isoformat() if estimate.fetched_at else None,
+        "error": estimate.error,
+    }
+
+
+@router.get("/market-value/cache")
+def list_cached_values(db: Session = Depends(get_db)):
+    rows = (
+        db.query(MarketValueCache)
+        .order_by(MarketValueCache.fetched_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "keyword": r.keyword,
+            "category": r.category,
+            "median_price": r.median_price,
+            "mean_price": r.mean_price,
+            "min_price": r.min_price,
+            "max_price": r.max_price,
+            "sample_count": r.sample_count,
+            "source": r.source,
+            "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+            "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.delete("/market-value/cache")
+def clear_market_value_cache(db: Session = Depends(get_db)):
+    count = db.query(MarketValueCache).count()
+    db.query(MarketValueCache).delete()
+    db.commit()
+    return {"ok": True, "cleared": count}
 
 
 # ─────────────────────────────────────────────────────────────

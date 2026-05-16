@@ -10,12 +10,15 @@ from sqlalchemy.orm import Session
 
 from backend.models.database import SessionLocal
 from backend.models.models import (
-    Watchlist, Source, ScraperRun, Listing, DealScore, GameCubePrice, AppSetting
+    Watchlist, Source, ScraperRun, Listing, DealScore, GameCubePrice, AppSetting,
+    ListingPriceHistory,
 )
+from backend.services.market_value import get_market_value
 from backend.scrapers.base import NormalizedListing
 from backend.scrapers.mock_scraper import MockScraper
 from backend.scrapers.auctionninja import AuctionNinjaScraper
 from backend.scrapers.facebook import FacebookScraper
+from backend.scrapers.craigslist import CraigslistScraper
 from backend.scoring.deal_scorer import score_listing
 from backend.scoring.gamecube_scorer import score_gamecube_listing
 from backend.services import discord as discord_service
@@ -27,6 +30,7 @@ SCRAPER_REGISTRY = {
     "mock": MockScraper,
     "auctionninja": AuctionNinjaScraper,
     "facebook": FacebookScraper,
+    "craigslist": CraigslistScraper,
 }
 
 
@@ -35,6 +39,26 @@ def _get_scraper(source_name: str, config: dict):
     if not cls:
         raise ValueError(f"Unknown scraper: {source_name}")
     return cls(config=config)
+
+
+def _record_price_change(db: Session, existing: Listing, new_price: Optional[float]):
+    """Record a ListingPriceHistory entry when price changes by more than $1."""
+    old_price = existing.price
+    if (
+        new_price is not None
+        and old_price is not None
+        and abs(new_price - old_price) > 1.0
+    ):
+        logger.info(
+            f"Price change detected: ${old_price:.2f} → ${new_price:.2f} for '{existing.title}'"
+        )
+        history = ListingPriceHistory(
+            listing_id=existing.id,
+            price=new_price,
+            recorded_at=datetime.utcnow(),
+        )
+        db.add(history)
+        existing.price = new_price
 
 
 def _deduplicate(db: Session, listing: NormalizedListing, watchlist_id: int) -> Optional[Listing]:
@@ -48,6 +72,7 @@ def _deduplicate(db: Session, listing: NormalizedListing, watchlist_id: int) -> 
         ).first()
         if existing:
             existing.last_seen_at = datetime.utcnow()
+            _record_price_change(db, existing, listing.price)
             return existing
 
     # Fallback: URL match
@@ -55,6 +80,7 @@ def _deduplicate(db: Session, listing: NormalizedListing, watchlist_id: int) -> 
         existing = q.filter(Listing.url == listing.url).first()
         if existing:
             existing.last_seen_at = datetime.utcnow()
+            _record_price_change(db, existing, listing.price)
             return existing
 
     return None
@@ -78,6 +104,16 @@ def _save_listing(db: Session, listing: NormalizedListing, watchlist_id: int) ->
     row.raw_payload = listing.raw_payload
     db.add(row)
     db.flush()
+
+    # Record initial price history entry
+    if listing.price is not None:
+        initial_history = ListingPriceHistory(
+            listing_id=row.id,
+            price=listing.price,
+            recorded_at=datetime.utcnow(),
+        )
+        db.add(initial_history)
+
     return row
 
 
@@ -114,6 +150,19 @@ def _score_listing(db: Session, listing: Listing, watchlist: Watchlist, settings
         score_row.reasons = result.reasons
         score_row.warnings = result.warnings
     else:
+        # Fetch market value from eBay sold listings for non-gamecube watchlists
+        market = get_market_value(
+            keyword=listing.title,
+            category=watchlist.category,
+            db=db,
+        )
+        estimated_value = market.median_price if market and not market.error else None
+        conservative_value = (
+            round(market.median_price * 0.8, 2)
+            if estimated_value is not None
+            else None
+        )
+
         result = score_listing(
             title=listing.title,
             description=listing.description or "",
@@ -122,6 +171,8 @@ def _score_listing(db: Session, listing: Listing, watchlist: Watchlist, settings
             watchlist_brands=watchlist.brands,
             watchlist_negative_keywords=watchlist.negative_keywords,
             thresholds=thresholds,
+            estimated_value=estimated_value,
+            conservative_value=conservative_value,
         )
         score_row = DealScore(
             listing_id=listing.id,
@@ -242,10 +293,49 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
             run.parsed_count += 1
 
         alert_count = 0
+        qualifying: list[tuple] = []  # (listing, score)
         for listing in new_listings:
             score = _score_listing(db, listing, watchlist, settings)
             db.flush()
             if not listing.ignored and _should_alert(score, watchlist):
+                qualifying.append((listing, score))
+
+        batch_threshold = settings.get("alert_batch_threshold", 3)
+
+        if len(qualifying) > batch_threshold:
+            # Send one batch alert
+            if watchlist.discord_webhook and watchlist.discord_webhook.enabled:
+                deals = []
+                for listing, score in qualifying:
+                    deals.append({
+                        "title": listing.title,
+                        "price": listing.price,
+                        "rating": score.rating,
+                        "conservative_value": score.conservative_value,
+                        "target_buy_price": score.target_buy_price,
+                        "estimated_profit": score.estimated_profit,
+                        "url": listing.url or "",
+                        "reasons": score.reasons or [],
+                    })
+                run_summary = {
+                    "raw_count": run.raw_count,
+                    "parsed_count": run.parsed_count,
+                    "duplicate_count": run.duplicate_count,
+                }
+                ok = discord_service.send_batch_alert(
+                    webhook_url=watchlist.discord_webhook.webhook_url,
+                    watchlist_name=watchlist.name,
+                    deals=deals,
+                    run_summary=run_summary,
+                )
+                if ok:
+                    for listing, _ in qualifying:
+                        listing.alert_sent = True
+                        listing.alert_sent_at = datetime.utcnow()
+                    alert_count = len(qualifying)
+        else:
+            # Send individual alerts (existing behavior)
+            for listing, score in qualifying:
                 ok = _send_alert(listing, score, watchlist)
                 if ok:
                     listing.alert_sent = True

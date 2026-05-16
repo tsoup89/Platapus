@@ -54,4 +54,7 @@ export const fbDebugScrape = (keyword) => api.post('/facebook/debug-scrape', nul
 
 export const updateSourceConfig = (name, config) => api.post(`/sources/${name}/update-config`, config).then(r => r.data)
 
+export const syncPriceCharting = (maxTitles = 50) => api.post('/gamecube/sync-pricecharting', null, { params: { max_titles: maxTitles } }).then(r => r.data)
+export const getSyncStatus = () => api.get('/gamecube/sync-status').then(r => r.data)
+
 export default api

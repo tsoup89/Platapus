@@ -381,6 +381,27 @@ function GlobalSettings() {
         </div>
       </div>
 
+      <hr className="section-divider" />
+
+      <div className="mb-16">
+        <strong style={{ fontSize: 13 }}>Alert Batching</strong>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+          Send batch summary instead of individual alerts when N+ deals qualify per run. 0 = always individual.
+        </div>
+        <div style={{ maxWidth: 200 }}>
+          <div className="form-group">
+            <label>Alert Batch Threshold</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={current.alert_batch_threshold ?? 3}
+              onChange={e => set('alert_batch_threshold', +e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
       <button className="btn btn-primary" onClick={() => saveMut.mutate(form || {})}>
         Save Settings
       </button>

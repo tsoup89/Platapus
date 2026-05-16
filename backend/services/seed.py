@@ -40,6 +40,15 @@ def _seed_sources(db: Session):
                 "request_delay_seconds": 2,
             }),
         ),
+        Source(
+            name="craigslist",
+            enabled=True,
+            type="craigslist",
+            status="unknown",
+            config_json=json.dumps({
+                "request_delay_seconds": 2,
+            }),
+        ),
     ]
 
     for source in sources:
@@ -74,7 +83,7 @@ def _seed_watchlists(db: Session):
             radius_miles=75,
             min_price=50,
             max_price=5000,
-            sources_enabled_json=json.dumps(["facebook", "auctionninja"]),
+            sources_enabled_json=json.dumps(["facebook", "auctionninja", "craigslist"]),
             run_frequency_minutes=60,
             min_rating_to_alert="GOOD",
             min_profit_margin=0.20,
@@ -108,7 +117,7 @@ def _seed_watchlists(db: Session):
             radius_miles=100,
             min_price=20,
             max_price=1000,
-            sources_enabled_json=json.dumps(["facebook", "auctionninja"]),
+            sources_enabled_json=json.dumps(["facebook", "auctionninja", "craigslist"]),
             run_frequency_minutes=60,
             min_rating_to_alert="GOOD",
             min_profit_margin=0.25,
@@ -139,7 +148,7 @@ def _seed_watchlists(db: Session):
             radius_miles=75,
             min_price=50,
             max_price=10000,
-            sources_enabled_json=json.dumps(["facebook", "auctionninja"]),
+            sources_enabled_json=json.dumps(["facebook", "auctionninja", "craigslist"]),
             run_frequency_minutes=90,
             min_rating_to_alert="GOOD",
             min_profit_margin=0.25,
@@ -172,6 +181,7 @@ def _seed_settings(db: Session):
         "gamecube_low_demand_discount": 0.60,
         "gamecube_platform_fee_pct": 0.13,
         "deal_thresholds": {"STEAL": 0.45, "GREAT": 0.55, "GOOD": 0.65, "FAIR": 0.75},
+        "alert_batch_threshold": 3,
     }
 
     for key, val in defaults.items():

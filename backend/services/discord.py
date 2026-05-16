@@ -148,6 +148,73 @@ def send_heartbeat(
     return _post_webhook(webhook_url, payload)
 
 
+def send_batch_alert(
+    webhook_url: str,
+    watchlist_name: str,
+    deals: list[dict],
+    run_summary: dict = None,
+) -> bool:
+    """Send one Discord embed listing all qualifying deals, ranked by rating."""
+    RATING_RANK = {"STEAL": 0, "GREAT": 1, "GOOD": 2, "FAIR": 3, "PASS": 4}
+    sorted_deals = sorted(deals, key=lambda d: RATING_RANK.get(d.get("rating", "PASS"), 99))
+
+    def fmt_money(v):
+        return f"${v:,.0f}" if v is not None else "N/A"
+
+    shown = sorted_deals[:10]
+    remainder = len(sorted_deals) - len(shown)
+
+    lines = [f"**{len(deals)} deal{'s' if len(deals) != 1 else ''} found — {watchlist_name}**", ""]
+
+    for deal in shown:
+        emoji = RATING_EMOJI.get(deal.get("rating", "PASS"), "📦")
+        rating = deal.get("rating", "?")
+        title = deal.get("title", "Unknown")[:60]
+        price = deal.get("price")
+        cons_val = deal.get("conservative_value")
+        profit = deal.get("estimated_profit")
+        url = deal.get("url", "")
+
+        price_str = fmt_money(price)
+        meta_parts = []
+        if cons_val is not None:
+            meta_parts.append(f"value: {fmt_money(cons_val)}")
+        if profit is not None:
+            meta_parts.append(f"profit: ~{fmt_money(profit)}")
+        meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
+
+        lines.append(f"{emoji} **{rating}** — {title} — {price_str}{meta}")
+        if url:
+            lines.append(f"🔗 {url}")
+        lines.append("")
+
+    if remainder > 0:
+        lines.append(f"*...and {remainder} more*")
+
+    if run_summary:
+        lines.append("")
+        parts = []
+        if "raw_count" in run_summary:
+            parts.append(f"{run_summary['raw_count']} raw")
+        if "parsed_count" in run_summary:
+            parts.append(f"{run_summary['parsed_count']} new")
+        if "duplicate_count" in run_summary:
+            parts.append(f"{run_summary['duplicate_count']} dupes")
+        if parts:
+            lines.append(f"*Run: {', '.join(parts)}*")
+
+    # Pick embed color from best deal rating
+    best_rating = sorted_deals[0].get("rating", "PASS") if sorted_deals else "PASS"
+    embed = {
+        "description": "\n".join(lines),
+        "color": _rating_color(best_rating),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Platapicker — Batch Alert"},
+    }
+    payload = {"embeds": [embed]}
+    return _post_webhook(webhook_url, payload)
+
+
 def send_test_message(webhook_url: str) -> bool:
     payload = {
         "content": "✅ **Platapicker** — Discord webhook is working! Your deal alerts will appear here."

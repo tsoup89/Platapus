@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Upload, Search, Star, RefreshCw } from 'lucide-react'
-import { getGCPrices, updateGCPrice, importGCCSV, getUnmatched, rescoreGamecube } from '../api'
+import { Upload, Search, Star, RefreshCw, CloudDownload } from 'lucide-react'
+import { getGCPrices, updateGCPrice, importGCCSV, getUnmatched, rescoreGamecube, syncPriceCharting, getSyncStatus } from '../api'
 
 function fmtMoney(v) {
   if (v == null) return '—'
@@ -49,6 +49,12 @@ export default function PricingTables() {
   const [search, setSearch] = useState('')
   const [msg, setMsg] = useState(null)
 
+  const { data: syncStatus } = useQuery({
+    queryKey: ['gc-sync-status'],
+    queryFn: getSyncStatus,
+    refetchInterval: 30_000,
+  })
+
   const { data: prices, isLoading } = useQuery({
     queryKey: ['gc-prices', search],
     queryFn: () => getGCPrices({ search, limit: 200 }),
@@ -78,6 +84,15 @@ export default function PricingTables() {
     onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
   })
 
+  const syncMut = useMutation({
+    mutationFn: () => syncPriceCharting(50),
+    onSuccess: (data) => {
+      setMsg(`✅ ${data.message}`)
+      qc.invalidateQueries(['gc-sync-status'])
+    },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
   const handleFileChange = (e) => {
     const file = e.target.files[0]
     if (file) importMut.mutate(file)
@@ -100,6 +115,15 @@ export default function PricingTables() {
           >
             <RefreshCw size={14} />
             {rescoreMut.isPending ? 'Rescoring...' : 'Re-score Listings'}
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => syncMut.mutate()}
+            disabled={syncMut.isPending}
+            title={syncStatus ? `${syncStatus.stale_count} stale titles / ${syncStatus.total} total` : 'Sync prices from PriceCharting.com'}
+          >
+            <CloudDownload size={14} />
+            {syncMut.isPending ? 'Syncing...' : 'Sync from PriceCharting'}
           </button>
           <button
             className="btn btn-primary"

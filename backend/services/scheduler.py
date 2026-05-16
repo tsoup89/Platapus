@@ -1,16 +1,18 @@
 """
 APScheduler-based background scheduler for automatic scraper runs.
-Reads run_frequency_minutes from each watchlist and schedules accordingly.
+Polls every 15 minutes (or the minimum watchlist interval, whichever is smaller)
+and respects each watchlist's individual run_frequency_minutes setting.
 """
 import logging
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.models.database import SessionLocal
-from backend.models.models import Watchlist, Source, AppSetting
+from backend.models.models import Watchlist, Source, AppSetting, ScraperRun
 from backend.services.settings import get_setting
 from backend.services.runner import run_scraper_for_watchlist
 from backend.services import discord as discord_service
@@ -19,9 +21,12 @@ logger = logging.getLogger("platapicker.scheduler")
 
 _scheduler: Optional[BackgroundScheduler] = None
 
+# Fallback polling interval when no watchlists define a frequency
+_DEFAULT_POLL_MINUTES = 15
+
 
 def _heartbeat_job():
-    """Send a Discord heartbeat summarizing last run results."""
+    """Send a Discord heartbeat summarising last run results."""
     db = SessionLocal()
     try:
         from backend.models.models import ScraperRun, DiscordWebhook
@@ -66,18 +71,75 @@ def _heartbeat_job():
         db.close()
 
 
-def _scrape_all_job():
-    """Run all enabled scrapers across all enabled watchlists."""
-    logger.info("Scheduled scrape run starting...")
-    try:
-        run_scraper_for_watchlist()
-    except Exception as e:
-        logger.error(f"Scheduled scrape failed: {e}", exc_info=True)
+def _get_min_interval(db) -> int:
+    """
+    Return the polling interval in minutes — the minimum of all enabled watchlist
+    run_frequency_minutes values, with a floor of 15 minutes.
+    """
+    watchlists = db.query(Watchlist).filter(Watchlist.enabled == True).all()
+    if not watchlists:
+        return _DEFAULT_POLL_MINUTES
+    frequencies = [
+        wl.run_frequency_minutes
+        for wl in watchlists
+        if wl.run_frequency_minutes and wl.run_frequency_minutes > 0
+    ]
+    if not frequencies:
+        return _DEFAULT_POLL_MINUTES
+    return max(_DEFAULT_POLL_MINUTES, min(frequencies))
 
+
+def _scrape_all_job():
+    """
+    Polling job: check each enabled watchlist and run only those that are due
+    based on their individual run_frequency_minutes setting.
+    """
+    logger.info("Scheduler poll: checking watchlist run schedules...")
     db = SessionLocal()
     try:
+        now = datetime.utcnow()
+        watchlists = db.query(Watchlist).filter(Watchlist.enabled == True).all()
+
+        for wl in watchlists:
+            frequency = wl.run_frequency_minutes or 60
+
+            # Find the most recent ScraperRun for this watchlist
+            last_run = (
+                db.query(ScraperRun)
+                .filter(ScraperRun.watchlist_id == wl.id)
+                .order_by(ScraperRun.started_at.desc())
+                .first()
+            )
+
+            if last_run and last_run.started_at:
+                elapsed_minutes = (now - last_run.started_at).total_seconds() / 60
+                if elapsed_minutes < frequency:
+                    logger.info(
+                        f"Watchlist '{wl.name}' not due yet "
+                        f"(last run {elapsed_minutes:.0f}m ago, interval {frequency}m)"
+                    )
+                    continue
+                logger.info(
+                    f"Watchlist '{wl.name}' due "
+                    f"(last run {elapsed_minutes:.0f}m ago, interval {frequency}m), running..."
+                )
+            else:
+                logger.info(
+                    f"Watchlist '{wl.name}' has never run, running now..."
+                )
+
+            try:
+                run_scraper_for_watchlist(watchlist_id=wl.id)
+            except Exception as e:
+                logger.error(
+                    f"Scrape failed for watchlist '{wl.name}': {e}", exc_info=True
+                )
+
         if get_setting(db, "heartbeat_enabled"):
             _heartbeat_job()
+
+    except Exception as e:
+        logger.error(f"Scheduler poll failed: {e}", exc_info=True)
     finally:
         db.close()
 
@@ -88,28 +150,34 @@ def start_scheduler():
     db = SessionLocal()
     try:
         enabled = get_setting(db, "global_schedule_enabled")
-        interval = get_setting(db, "global_schedule_interval_minutes") or 60
+        poll_interval = _get_min_interval(db)
     finally:
         db.close()
 
     if not enabled:
-        logger.info("Scheduler disabled in settings. Set global_schedule_enabled=true to enable.")
+        logger.info(
+            "Scheduler disabled in settings. "
+            "Set global_schedule_enabled=true to enable."
+        )
         return
 
     _scheduler = BackgroundScheduler(timezone="UTC")
 
     _scheduler.add_job(
         _scrape_all_job,
-        trigger=IntervalTrigger(minutes=int(interval)),
+        trigger=IntervalTrigger(minutes=poll_interval),
         id="scrape_all",
-        name="Run all scrapers",
+        name="Poll watchlist schedules",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
     )
 
     _scheduler.start()
-    logger.info(f"Scheduler started — scrape every {interval} minutes.")
+    logger.info(
+        f"Scheduler started — polling every {poll_interval} minutes "
+        "(each watchlist controls its own cadence)."
+    )
 
 
 def stop_scheduler():
@@ -134,7 +202,7 @@ def get_scheduler_status() -> dict:
 
 
 def reschedule(interval_minutes: int):
-    """Update scrape interval without restarting the app."""
+    """Update the poll interval without restarting the app."""
     global _scheduler
     if not _scheduler or not _scheduler.running:
         return
@@ -142,4 +210,4 @@ def reschedule(interval_minutes: int):
         "scrape_all",
         trigger=IntervalTrigger(minutes=interval_minutes),
     )
-    logger.info(f"Scheduler rescheduled to every {interval_minutes} minutes.")
+    logger.info(f"Scheduler poll rescheduled to every {interval_minutes} minutes.")

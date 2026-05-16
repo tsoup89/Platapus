@@ -167,6 +167,7 @@ export default function Listings() {
           <table>
             <thead>
               <tr>
+                <th>📷</th>
                 <th>Title</th>
                 <th>Source</th>
                 <th>Price</th>
@@ -182,6 +183,11 @@ export default function Listings() {
             <tbody>
               {listings?.map(l => (
                 <tr key={l.id} style={{ opacity: l.ignored ? 0.45 : 1 }}>
+                  <td style={{ padding: '6px 10px', width: 68 }}>
+                    {l.image_url
+                      ? <img src={l.image_url} alt="" className="listing-thumb" />
+                      : <div className="listing-thumb-empty">No img</div>}
+                  </td>
                   <td style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {l.url
                       ? <a href={l.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
@@ -221,7 +227,7 @@ export default function Listings() {
               ))}
               {!listings?.length && (
                 <tr>
-                  <td colSpan={10}>
+                  <td colSpan={11}>
                     <div className="empty-state">
                       <div className="icon">🔍</div>
                       <div>No listings yet. Run a scraper to start finding deals.</div>
