@@ -18,14 +18,63 @@ Platapicker monitors multiple sources (Facebook Marketplace, AuctionNinja) for d
 
 ---
 
-## Quick Start
+## Install as a Linux Service (Recommended)
+
+Run once. Platapicker starts automatically on boot and runs in the background — no window to keep open.
+
+**Prerequisites:** Python 3.11+, Node.js 18+, npm
+
+```bash
+git clone https://github.com/tsoup89/Platapus.git
+cd Platapus
+chmod +x install.sh
+./install.sh
+```
+
+The installer will:
+1. Create a Python virtualenv and install all dependencies
+2. Build the React frontend
+3. Install a systemd service that starts on boot
+4. Start the service immediately
+
+Once installed:
+
+```bash
+# Open the dashboard
+xdg-open http://localhost:8000
+
+# View live logs
+journalctl -u platapicker -f
+
+# Check status
+systemctl status platapicker
+
+# Stop / start / restart
+sudo systemctl stop platapicker
+sudo systemctl start platapicker
+sudo systemctl restart platapicker
+
+# Uninstall
+./uninstall.sh
+```
+
+After install, edit `.env` with your Discord webhook URLs and Facebook credentials, then restart:
+
+```bash
+nano .env
+sudo systemctl restart platapicker
+```
+
+---
+
+## Manual Quick Start (development)
 
 ### 1. Clone and set up Python environment
 
 ```bash
 cd Platapus
 python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -36,25 +85,15 @@ cp .env.example .env
 # Edit .env and add your Discord webhook URLs
 ```
 
-### 3. Set up the database
+### 3. Start the backend
 
 ```bash
-python -m platapicker seed
+python run.py
 ```
 
-This creates the database and loads the three default watchlists (Espresso Machines, GameCube, Outdoor Furniture).
+The API and dashboard will be available at **http://localhost:8000**
 
-### 4. Start the backend
-
-```bash
-python backend/main.py
-```
-
-The API will be available at **http://localhost:8000**
-
-The API docs are at **http://localhost:8000/docs**
-
-### 5. Start the frontend (optional, for the dashboard)
+### 4. Start the frontend dev server (optional, for hot-reload)
 
 ```bash
 cd frontend
@@ -304,10 +343,14 @@ Run `python -m platapicker facebook-login` and log in through the browser.
 
 ## Roadmap
 
-- [ ] Scheduled automatic scraping (APScheduler)
-- [ ] Heartbeat Discord alerts after each run
-- [ ] More scraper sources (Craigslist, eBay, etc.)
-- [ ] Better price data import (direct PriceCharting API)
+- [x] Scheduled automatic scraping (per-watchlist APScheduler)
+- [x] Heartbeat Discord alerts after each run
+- [x] Craigslist scraper
+- [x] eBay sold-listings market value for scoring
+- [x] Alert batching (ranked Discord embed for high-volume runs)
+- [x] PriceCharting price sync
+- [x] Price history tracking
+- [x] Linux systemd service installer
 - [ ] Platapicker mascot / logo
 - [ ] Mobile-friendly dashboard
 - [ ] Email alerts
