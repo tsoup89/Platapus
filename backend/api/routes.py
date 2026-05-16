@@ -26,6 +26,7 @@ from backend.services import discord as discord_service
 from backend.services.settings import get_all_settings, set_setting
 from backend.scoring.title_matcher import normalize_title
 from backend.services.runner import run_scraper_for_watchlist
+from backend.services import scheduler as scheduler_service
 
 logger = logging.getLogger("platapicker.api")
 router = APIRouter()
@@ -516,3 +517,90 @@ def reset_alerts(db: Session = Depends(get_db)):
     db.query(Listing).update({"alert_sent": False, "alert_sent_at": None})
     db.commit()
     return {"ok": True, "message": "All alert sent flags reset."}
+
+
+# ─────────────────────────────────────────────────────────────
+# Scheduler
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/scheduler/status")
+def scheduler_status():
+    return scheduler_service.get_scheduler_status()
+
+
+@router.post("/scheduler/run-now")
+def scheduler_run_now(background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_scraper_for_watchlist)
+    return {"message": "Full scrape queued."}
+
+
+@router.post("/scheduler/reschedule")
+def scheduler_reschedule(interval_minutes: int, db: Session = Depends(get_db)):
+    set_setting(db, "global_schedule_interval_minutes", interval_minutes)
+    scheduler_service.reschedule(interval_minutes)
+    return {"ok": True, "interval_minutes": interval_minutes}
+
+
+# ─────────────────────────────────────────────────────────────
+# Facebook-specific
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/facebook/session-status")
+def facebook_session_status():
+    from pathlib import Path
+    session_file = Path("browser_sessions/facebook/session.json")
+    if session_file.exists():
+        size = session_file.stat().st_size
+        mtime = datetime.utcfromtimestamp(session_file.stat().st_mtime).isoformat()
+        return {
+            "has_session": True,
+            "session_size_bytes": size,
+            "last_modified": mtime,
+            "message": "Session file found. Facebook scraper should be ready.",
+        }
+    return {
+        "has_session": False,
+        "message": "No session found. Run: python platapicker.py facebook-login",
+    }
+
+
+@router.post("/facebook/debug-scrape")
+def facebook_debug_scrape(
+    keyword: str = "GameCube",
+    location: str = "New York, NY",
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """Run a single Facebook search and return raw card count — does not save listings."""
+    def _debug():
+        from backend.scrapers.facebook import FacebookScraper
+        src = db.query(Source).filter(Source.name == "facebook").first()
+        config = src.config if src else {}
+        scraper = FacebookScraper(config=config)
+        raw, health = scraper.run(keyword, location, 50)
+        logger.info(
+            f"[DEBUG] Facebook '{keyword}': {health.raw_count} raw cards, "
+            f"{len(raw)} parsed, status={health.status}, error={health.last_error}"
+        )
+
+    if background_tasks:
+        background_tasks.add_task(_debug)
+        return {"message": f"Debug scrape for '{keyword}' queued — check logs."}
+    return {"message": "No background task context available."}
+
+
+@router.post("/sources/{source_name}/update-config")
+def update_source_config(
+    source_name: str,
+    config: dict,
+    db: Session = Depends(get_db),
+):
+    src = db.query(Source).filter(Source.name == source_name).first()
+    if not src:
+        raise HTTPException(404, "Source not found")
+    existing = src.config
+    existing.update(config)
+    src.config = existing
+    src.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "config": src.config}

@@ -1,11 +1,189 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Send } from 'lucide-react'
+import { Plus, Trash2, Send, Clock, Play, RefreshCw } from 'lucide-react'
 import {
   getSettings, updateSettings,
   getWebhooks, createWebhook, deleteWebhook, testWebhook,
   clearDuplicates, resetAlerts,
+  getSchedulerStatus, runAllNow, reschedule,
+  getFBSessionStatus, fbDebugScrape,
+  updateSettings as saveSettings,
 } from '../api'
+import api from '../api'
+
+function fmtDate(dt) {
+  if (!dt) return 'Never'
+  return new Date(dt + 'Z').toLocaleString()
+}
+
+function SchedulerSection() {
+  const qc = useQueryClient()
+  const [msg, setMsg] = useState(null)
+  const [interval, setInterval_] = useState(60)
+
+  const { data: status } = useQuery({
+    queryKey: ['scheduler-status'],
+    queryFn: getSchedulerStatus,
+    refetchInterval: 15_000,
+  })
+
+  const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
+
+  const runMut = useMutation({
+    mutationFn: runAllNow,
+    onSuccess: () => setMsg('✅ Full scrape queued — check Scraper Health for progress.'),
+    onError: (e) => setMsg(`❌ ${e.message}`),
+  })
+
+  const rescheduleMut = useMutation({
+    mutationFn: (m) => reschedule(m),
+    onSuccess: (d) => { setMsg(`✅ Rescheduled to every ${d.interval_minutes} minutes.`); qc.invalidateQueries(['settings']) },
+    onError: (e) => setMsg(`❌ ${e.message}`),
+  })
+
+  const enableMut = useMutation({
+    mutationFn: (val) => api.post('/settings', { global_schedule_enabled: val }).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries(['settings', 'scheduler-status']),
+  })
+
+  const isEnabled = settings?.global_schedule_enabled ?? false
+  const currentInterval = settings?.global_schedule_interval_minutes ?? 60
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Clock size={14} /> Automatic Scheduling
+      </div>
+
+      {msg && <div className={msg.startsWith('✅') ? 'success-box' : 'error-box'}>{msg}</div>}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <div>
+          <span className={`badge ${isEnabled ? 'badge-green' : 'badge-gray'}`}>
+            {isEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+          {status?.running && (
+            <span className="badge badge-blue" style={{ marginLeft: 8 }}>Scheduler running</span>
+          )}
+        </div>
+        <button
+          className={`btn btn-sm ${isEnabled ? 'btn-secondary' : 'btn-primary'}`}
+          onClick={() => enableMut.mutate(!isEnabled)}
+        >
+          {isEnabled ? 'Disable Auto-Scrape' : 'Enable Auto-Scrape'}
+        </button>
+        <button
+          className="btn btn-sm btn-primary"
+          onClick={() => runMut.mutate()}
+          disabled={runMut.isPending}
+        >
+          <Play size={12} /> Run All Now
+        </button>
+      </div>
+
+      {status?.jobs?.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          {status.jobs.map(j => (
+            <div key={j.id} style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+              Next run: <strong style={{ color: 'var(--text)' }}>{fmtDate(j.next_run)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
+        <div className="form-group" style={{ marginBottom: 0 }}>
+          <label>Run interval (minutes)</label>
+          <input
+            type="number"
+            style={{ width: 120 }}
+            value={interval}
+            onChange={e => setInterval_(+e.target.value)}
+            min={5}
+          />
+        </div>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={() => rescheduleMut.mutate(interval)}
+          disabled={rescheduleMut.isPending}
+        >
+          <RefreshCw size={12} /> Apply
+        </button>
+        <span className="text-muted" style={{ fontSize: 12, paddingBottom: 4 }}>
+          Currently: every {currentInterval} min
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function FacebookSection() {
+  const [msg, setMsg] = useState(null)
+
+  const { data: fbStatus } = useQuery({
+    queryKey: ['fb-session'],
+    queryFn: getFBSessionStatus,
+    refetchInterval: 30_000,
+  })
+
+  const debugMut = useMutation({
+    mutationFn: (kw) => fbDebugScrape(kw),
+    onSuccess: (d) => setMsg(`✅ ${d.message}`),
+    onError: (e) => setMsg(`❌ ${e.message}`),
+  })
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-title">Facebook Marketplace</div>
+      {msg && <div className={msg.startsWith('✅') ? 'success-box' : 'error-box'}>{msg}</div>}
+
+      <div style={{ marginBottom: 12 }}>
+        {fbStatus?.has_session ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="badge badge-green">Session Active</span>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              Last saved: {fmtDate(fbStatus.last_modified)} ({fbStatus.session_size_bytes} bytes)
+            </span>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="badge badge-red">No Session</span>
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {fbStatus?.message}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="actions-row">
+        <div
+          className="btn btn-secondary"
+          style={{ cursor: 'default', fontSize: 12, color: 'var(--text-muted)' }}
+        >
+          🔑 To log in: run <code style={{ background: 'var(--bg)', padding: '1px 6px', borderRadius: 4 }}>python platapicker.py facebook-login</code> in your terminal
+        </div>
+      </div>
+
+      <hr className="section-divider" />
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Debug Scrape</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+        Run a single Facebook search without saving results — check server logs for card count.
+      </div>
+      <div className="actions-row">
+        {['GameCube', 'espresso machine', 'patio set'].map(kw => (
+          <button
+            key={kw}
+            className="btn btn-sm btn-secondary"
+            onClick={() => debugMut.mutate(kw)}
+            disabled={debugMut.isPending}
+          >
+            Debug: "{kw}"
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function WebhooksSection() {
   const qc = useQueryClient()
@@ -63,7 +241,7 @@ function WebhooksSection() {
             {webhooks.map(wh => (
               <tr key={wh.id}>
                 <td>{wh.name}</td>
-                <td className="text-muted" style={{ fontSize: 12 }}>{wh.webhook_url.slice(0, 60)}...</td>
+                <td className="text-muted" style={{ fontSize: 12 }}>{wh.webhook_url.slice(0, 55)}...</td>
                 <td>
                   <div className="actions-row">
                     <button className="btn btn-sm btn-secondary" onClick={() => testMut.mutate(wh.id)}>
@@ -100,50 +278,27 @@ function GlobalSettings() {
 
   if (isLoading) return <div className="loading">Loading settings...</div>
   const current = form || settings || {}
-
   const set = (k, v) => setForm(f => ({ ...(f || settings), [k]: v }))
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
-      <div className="card-title">Global Settings</div>
+      <div className="card-title">Deal Thresholds & Scoring</div>
       {msg && <div className={msg.startsWith('✅') ? 'success-box' : 'error-box'}>{msg}</div>}
 
       <div className="mb-16">
-        <strong style={{ fontSize: 13 }}>Facebook Slow Mode</strong>
-        <div className="grid-2" style={{ marginTop: 8 }}>
-          <div className="form-group">
-            <label>Min Delay (seconds)</label>
-            <input type="number" value={current.facebook_min_delay_seconds ?? 3} onChange={e => set('facebook_min_delay_seconds', +e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Max Delay (seconds)</label>
-            <input type="number" value={current.facebook_max_delay_seconds ?? 8} onChange={e => set('facebook_max_delay_seconds', +e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Max Listings Per Run</label>
-            <input type="number" value={current.facebook_max_listings_per_run ?? 50} onChange={e => set('facebook_max_listings_per_run', +e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Max Searches Per Run</label>
-            <input type="number" value={current.facebook_max_searches_per_run ?? 5} onChange={e => set('facebook_max_searches_per_run', +e.target.value)} />
-          </div>
-        </div>
-      </div>
-
-      <hr className="section-divider" />
-
-      <div className="mb-16">
-        <strong style={{ fontSize: 13 }}>Deal Thresholds</strong>
+        <strong style={{ fontSize: 13 }}>Deal Rating Thresholds</strong>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-          Price as % of conservative value to earn each rating.
+          Price as a ratio of conservative value. E.g. 0.45 means price ≤ 45% of value = STEAL.
         </div>
         <div className="grid-2">
           {['STEAL', 'GREAT', 'GOOD', 'FAIR'].map(r => (
             <div className="form-group" key={r}>
-              <label>{r} (ratio, e.g. 0.45 = 45%)</label>
+              <label><span className={`rating-${r}`}>{r}</span> — max ratio</label>
               <input
                 type="number"
                 step="0.01"
+                min="0.1"
+                max="1.0"
                 value={current.deal_thresholds?.[r] ?? 0.5}
                 onChange={e => set('deal_thresholds', { ...(current.deal_thresholds || {}), [r]: +e.target.value })}
               />
@@ -166,8 +321,32 @@ function GlobalSettings() {
             <input type="number" step="0.01" value={current.gamecube_low_demand_discount ?? 0.60} onChange={e => set('gamecube_low_demand_discount', +e.target.value)} />
           </div>
           <div className="form-group">
-            <label>Platform Fee</label>
+            <label>Platform Fee %</label>
             <input type="number" step="0.01" value={current.gamecube_platform_fee_pct ?? 0.13} onChange={e => set('gamecube_platform_fee_pct', +e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      <hr className="section-divider" />
+
+      <div className="mb-16">
+        <strong style={{ fontSize: 13 }}>Facebook Slow Mode</strong>
+        <div className="grid-2" style={{ marginTop: 8 }}>
+          <div className="form-group">
+            <label>Min Delay (seconds)</label>
+            <input type="number" value={current.facebook_min_delay_seconds ?? 3} onChange={e => set('facebook_min_delay_seconds', +e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Max Delay (seconds)</label>
+            <input type="number" value={current.facebook_max_delay_seconds ?? 8} onChange={e => set('facebook_max_delay_seconds', +e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Max Listings Per Run</label>
+            <input type="number" value={current.facebook_max_listings_per_run ?? 50} onChange={e => set('facebook_max_listings_per_run', +e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Max Searches Per Run</label>
+            <input type="number" value={current.facebook_max_searches_per_run ?? 5} onChange={e => set('facebook_max_searches_per_run', +e.target.value)} />
           </div>
         </div>
       </div>
@@ -200,20 +379,20 @@ function MaintenanceSection() {
       <div className="actions-row">
         <button
           className="btn btn-secondary"
-          onClick={() => window.confirm('Clear all listing history?') && clearMut.mutate()}
+          onClick={() => window.confirm('Clear all listing history? This cannot be undone.') && clearMut.mutate()}
         >
           Clear Duplicate Cache
         </button>
         <button
           className="btn btn-secondary"
-          onClick={() => window.confirm('Reset all alert flags?') && resetMut.mutate()}
+          onClick={() => window.confirm('Reset all alert flags? All listings can be re-alerted.') && resetMut.mutate()}
         >
           Reset Alert Flags
         </button>
       </div>
       <div className="text-muted" style={{ fontSize: 12, marginTop: 12 }}>
-        Clearing the duplicate cache will remove all saved listings. New scrapes will re-import them.
-        Resetting alert flags allows all existing listings to be re-alerted.
+        <strong>Clear Duplicate Cache:</strong> Removes all saved listings. Next scrape re-imports everything from scratch.<br />
+        <strong>Reset Alert Flags:</strong> Allows existing listings to be re-alerted on next scrape.
       </div>
     </div>
   )
@@ -225,10 +404,12 @@ export default function SettingsPage() {
       <div className="page-header">
         <div>
           <div className="page-title">Settings</div>
-          <div className="page-subtitle">Configure Discord webhooks, scraper behavior, and deal thresholds.</div>
+          <div className="page-subtitle">Configure scheduling, Discord, Facebook, and deal thresholds.</div>
         </div>
       </div>
+      <SchedulerSection />
       <WebhooksSection />
+      <FacebookSection />
       <GlobalSettings />
       <MaintenanceSection />
     </div>

@@ -219,5 +219,31 @@ def cmd_reset_duplicates():
         db.close()
 
 
+@cli.command("heartbeat")
+def cmd_heartbeat():
+    """Send a Discord heartbeat with current scraper health."""
+    from backend.services.scheduler import _heartbeat_job
+    init_db()
+    _heartbeat_job()
+    click.echo("✅ Heartbeat sent (if webhook is configured).")
+
+
+@cli.command("scheduler-status")
+def cmd_scheduler_status():
+    """Show current scheduler configuration."""
+    init_db()
+    db = SessionLocal()
+    try:
+        from backend.services.settings import get_setting
+        enabled = get_setting(db, "global_schedule_enabled")
+        interval = get_setting(db, "global_schedule_interval_minutes")
+        click.echo(f"\n🦆 Platapicker Scheduler\n" + "─" * 40)
+        click.echo(f"  Enabled:  {'Yes' if enabled else 'No (start server to activate)'}")
+        click.echo(f"  Interval: every {interval} minutes")
+        click.echo(f"\n  Note: scheduler runs inside the server process (python run.py)")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     cli()

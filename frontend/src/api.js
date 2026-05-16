@@ -43,3 +43,14 @@ export const updateSettings = (data) => api.post('/settings', data).then(r => r.
 
 export const clearDuplicates = () => api.post('/maintenance/clear-duplicates').then(r => r.data)
 export const resetAlerts = () => api.post('/maintenance/reset-alerts').then(r => r.data)
+
+export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
+export const runAllNow = () => api.post('/scheduler/run-now').then(r => r.data)
+export const reschedule = (minutes) => api.post('/scheduler/reschedule', null, { params: { interval_minutes: minutes } }).then(r => r.data)
+
+export const getFBSessionStatus = () => api.get('/facebook/session-status').then(r => r.data)
+export const fbDebugScrape = (keyword) => api.post('/facebook/debug-scrape', null, { params: { keyword } }).then(r => r.data)
+
+export const updateSourceConfig = (name, config) => api.post(`/sources/${name}/update-config`, config).then(r => r.data)
+
+export default api

@@ -15,6 +15,7 @@ from backend.models.database import init_db
 from backend.services.seed import seed_database
 from backend.models.database import SessionLocal
 from backend.api.routes import router
+from backend.services.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger("platapicker")
 
@@ -28,8 +29,10 @@ async def lifespan(app: FastAPI):
         seed_database(db)
     finally:
         db.close()
+    start_scheduler()
     logger.info("✅ Database ready. Platapicker is running.")
     yield
+    stop_scheduler()
     logger.info("Platapicker shutting down.")
 
 

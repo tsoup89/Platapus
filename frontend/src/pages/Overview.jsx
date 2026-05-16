@@ -1,6 +1,6 @@
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Play, Send, Activity, AlertTriangle } from 'lucide-react'
-import { getOverview, runAll, testWebhook, getWebhooks } from '../api'
+import { Play, Send, Activity, Clock } from 'lucide-react'
+import { getOverview, runAll, testWebhook, getWebhooks, getSchedulerStatus, runAllNow } from '../api'
 
 const STATUS_BADGE = {
   healthy: <span className="badge badge-green">Healthy</span>,
@@ -25,8 +25,14 @@ export default function Overview() {
 
   const { data: webhooks } = useQuery({ queryKey: ['webhooks'], queryFn: getWebhooks })
 
+  const { data: schedStatus } = useQuery({
+    queryKey: ['scheduler-status'],
+    queryFn: getSchedulerStatus,
+    refetchInterval: 15_000,
+  })
+
   const runMut = useMutation({
-    mutationFn: runAll,
+    mutationFn: runAllNow,
     onSuccess: () => setTimeout(refetch, 1000),
   })
 
@@ -124,9 +130,24 @@ export default function Overview() {
         </table>
       </div>
 
-      <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)' }}>
-        <Activity size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-        Dashboard refreshes every 30 seconds. Logo/mascot placeholder — branding coming soon.
+      <div style={{ marginTop: 16, display: 'flex', gap: 16, alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+        <span>
+          <Activity size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+          Refreshes every 30s
+        </span>
+        {schedStatus && (
+          <span>
+            <Clock size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+            Scheduler: {schedStatus.running ? (
+              <span style={{ color: 'var(--green)' }}>
+                running — next run {schedStatus.jobs?.[0]?.next_run ? fmtDate(schedStatus.jobs[0].next_run) : '—'}
+              </span>
+            ) : (
+              <span style={{ color: 'var(--text-muted)' }}>disabled (enable in Settings)</span>
+            )}
+          </span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--border)' }}>🦆 logo placeholder</span>
       </div>
     </div>
   )
