@@ -450,12 +450,50 @@ async def import_gamecube_csv(file: UploadFile = File(...), db: Session = Depend
             imported += 1
 
     db.commit()
+
+    # Auto-rescore existing GameCube listings with new prices
+    from backend.services.settings import get_all_settings
+    from backend.scoring.gamecube_scorer import score_gamecube_listing
+    settings = get_all_settings(db)
+    gc_wl = db.query(Watchlist).filter(Watchlist.category == "gamecube").first()
+    rescored = 0
+    if gc_wl:
+        gc_prices_all = db.query(GameCubePrice).all()
+        thresholds = settings.get("deal_thresholds", {"STEAL": 0.45, "GREAT": 0.55, "GOOD": 0.65, "FAIR": 0.75})
+        for listing in db.query(Listing).filter(Listing.watchlist_id == gc_wl.id).all():
+            result = score_gamecube_listing(
+                title=listing.title,
+                description=listing.description or "",
+                price=listing.price or 0,
+                gamecube_prices=gc_prices_all,
+                platform_fee_pct=settings.get("gamecube_platform_fee_pct", 0.13),
+                bundle_discount=settings.get("gamecube_bundle_discount", 0.85),
+                low_demand_discount=settings.get("gamecube_low_demand_discount", 0.60),
+                thresholds=thresholds,
+                aliases=gc_wl.aliases,
+            )
+            existing_score = db.query(DealScore).filter(DealScore.listing_id == listing.id).first()
+            if existing_score:
+                existing_score.rating = result.rating
+                existing_score.score = result.score
+                existing_score.estimated_value = result.estimated_value
+                existing_score.conservative_value = result.conservative_value
+                existing_score.target_buy_price = result.target_buy_30pct
+                existing_score.estimated_profit = result.estimated_profit
+                existing_score.profit_margin = result.profit_margin
+                existing_score.confidence = result.confidence
+                existing_score.reasons = result.reasons
+                existing_score.warnings = result.warnings
+                rescored += 1
+        db.commit()
+
     return {
         "ok": True,
         "imported": imported,
         "updated": updated,
+        "rescored": rescored,
         "errors": errors,
-        "message": f"Imported {imported} new titles, updated {updated} existing.",
+        "message": f"Imported {imported} new titles, updated {updated} existing. Re-scored {rescored} listings.",
     }
 
 
@@ -517,6 +555,74 @@ def reset_alerts(db: Session = Depends(get_db)):
     db.query(Listing).update({"alert_sent": False, "alert_sent_at": None})
     db.commit()
     return {"ok": True, "message": "All alert sent flags reset."}
+
+
+@router.post("/maintenance/rescore-gamecube")
+def rescore_gamecube(db: Session = Depends(get_db)):
+    """Re-score all GameCube watchlist listings after a pricing CSV update."""
+    from backend.services.settings import get_all_settings
+    settings = get_all_settings(db)
+
+    wl = db.query(Watchlist).filter(Watchlist.category == "gamecube").first()
+    if not wl:
+        raise HTTPException(404, "No GameCube watchlist found.")
+
+    listings = db.query(Listing).filter(Listing.watchlist_id == wl.id).all()
+    if not listings:
+        return {"ok": True, "rescored": 0, "message": "No GameCube listings to rescore."}
+
+    from backend.scoring.gamecube_scorer import score_gamecube_listing
+    from backend.models.models import GameCubePrice
+
+    gc_prices = db.query(GameCubePrice).all()
+    thresholds = settings.get("deal_thresholds", {
+        "STEAL": 0.45, "GREAT": 0.55, "GOOD": 0.65, "FAIR": 0.75
+    })
+
+    rescored = 0
+    for listing in listings:
+        result = score_gamecube_listing(
+            title=listing.title,
+            description=listing.description or "",
+            price=listing.price or 0,
+            gamecube_prices=gc_prices,
+            platform_fee_pct=settings.get("gamecube_platform_fee_pct", 0.13),
+            bundle_discount=settings.get("gamecube_bundle_discount", 0.85),
+            low_demand_discount=settings.get("gamecube_low_demand_discount", 0.60),
+            thresholds=thresholds,
+            aliases=wl.aliases,
+        )
+
+        existing = db.query(DealScore).filter(DealScore.listing_id == listing.id).first()
+        if existing:
+            existing.rating = result.rating
+            existing.score = result.score
+            existing.estimated_value = result.estimated_value
+            existing.conservative_value = result.conservative_value
+            existing.target_buy_price = result.target_buy_30pct
+            existing.estimated_profit = result.estimated_profit
+            existing.profit_margin = result.profit_margin
+            existing.confidence = result.confidence
+            existing.reasons = result.reasons
+            existing.warnings = result.warnings
+            existing.created_at = datetime.utcnow()
+        else:
+            score_row = DealScore(listing_id=listing.id)
+            score_row.rating = result.rating
+            score_row.score = result.score
+            score_row.estimated_value = result.estimated_value
+            score_row.conservative_value = result.conservative_value
+            score_row.target_buy_price = result.target_buy_30pct
+            score_row.estimated_profit = result.estimated_profit
+            score_row.profit_margin = result.profit_margin
+            score_row.confidence = result.confidence
+            score_row.reasons = result.reasons
+            score_row.warnings = result.warnings
+            db.add(score_row)
+        rescored += 1
+
+    db.commit()
+    return {"ok": True, "rescored": rescored, "message": f"Re-scored {rescored} GameCube listings."}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ export const updateSettings = (data) => api.post('/settings', data).then(r => r.
 
 export const clearDuplicates = () => api.post('/maintenance/clear-duplicates').then(r => r.data)
 export const resetAlerts = () => api.post('/maintenance/reset-alerts').then(r => r.data)
+export const rescoreGamecube = () => api.post('/maintenance/rescore-gamecube').then(r => r.data)
 
 export const getSchedulerStatus = () => api.get('/scheduler/status').then(r => r.data)
 export const runAllNow = () => api.post('/scheduler/run-now').then(r => r.data)

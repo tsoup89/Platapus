@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Upload, Search, Star } from 'lucide-react'
-import { getGCPrices, updateGCPrice, importGCCSV, getUnmatched } from '../api'
+import { Upload, Search, Star, RefreshCw } from 'lucide-react'
+import { getGCPrices, updateGCPrice, importGCCSV, getUnmatched, rescoreGamecube } from '../api'
 
 function fmtMoney(v) {
   if (v == null) return '—'
@@ -64,6 +64,16 @@ export default function PricingTables() {
     onSuccess: (data) => {
       setMsg(`✅ ${data.message}`)
       qc.invalidateQueries(['gc-prices'])
+      qc.invalidateQueries(['listings'])
+    },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
+  const rescoreMut = useMutation({
+    mutationFn: rescoreGamecube,
+    onSuccess: (data) => {
+      setMsg(`✅ ${data.message}`)
+      qc.invalidateQueries(['listings'])
     },
     onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
   })
@@ -82,6 +92,15 @@ export default function PricingTables() {
         </div>
         <div className="actions-row">
           <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleFileChange} />
+          <button
+            className="btn btn-secondary"
+            onClick={() => rescoreMut.mutate()}
+            disabled={rescoreMut.isPending}
+            title="Re-score all GameCube listings using current prices"
+          >
+            <RefreshCw size={14} />
+            {rescoreMut.isPending ? 'Rescoring...' : 'Re-score Listings'}
+          </button>
           <button
             className="btn btn-primary"
             onClick={() => fileRef.current.click()}

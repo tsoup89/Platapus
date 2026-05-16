@@ -28,6 +28,7 @@ function SchedulerSection() {
   })
 
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
+  const { data: webhooks } = useQuery({ queryKey: ['webhooks'], queryFn: getWebhooks })
 
   const runMut = useMutation({
     mutationFn: runAllNow,
@@ -112,6 +113,35 @@ function SchedulerSection() {
         <span className="text-muted" style={{ fontSize: 12, paddingBottom: 4 }}>
           Currently: every {currentInterval} min
         </span>
+      </div>
+
+      <hr className="section-divider" />
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Heartbeat Alerts</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+        After each scheduled run, send a Discord summary showing source health and counts.
+      </div>
+      <div className="grid-2">
+        <div className="form-group">
+          <label>Heartbeat Webhook</label>
+          <select
+            value={settings?.heartbeat_discord_webhook_id ?? ''}
+            onChange={e => {
+              const val = e.target.value ? +e.target.value : null
+              api.post('/settings', { heartbeat_discord_webhook_id: val, heartbeat_enabled: !!val })
+                .then(() => qc.invalidateQueries(['settings']))
+            }}
+          >
+            <option value="">Disabled</option>
+            {webhooks?.map(wh => <option key={wh.id} value={wh.id}>{wh.name}</option>)}
+          </select>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 2 }}>
+          <span className="text-muted" style={{ fontSize: 12 }}>
+            {settings?.heartbeat_enabled
+              ? '✅ Heartbeat enabled — summary sent after each run'
+              : '—  Select a webhook to enable heartbeat'}
+          </span>
+        </div>
       </div>
     </div>
   )
