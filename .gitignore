@@ -33,6 +33,9 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 
+# Electron build output
+dist-electron/
+
 # macOS
 .DS_Store
 

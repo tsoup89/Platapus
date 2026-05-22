@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Optional
 
 from .base import BaseScraper, NormalizedListing, ScraperHealth
+from backend.services.paths import get_screenshots_dir, get_debug_html_dir
 
 logger = logging.getLogger("platapicker.scrapers.auctionninja")
 
-SCREENSHOT_DIR = Path("screenshots")
-SCREENSHOT_DIR.mkdir(exist_ok=True)
+SCREENSHOT_DIR = get_screenshots_dir()
 
 BASE_URL = "https://www.auctionninja.com"
 
@@ -321,12 +321,11 @@ class AuctionNinjaScraper(BaseScraper):
             return None
 
     def _save_debug_html(self, html: str, label: str):
-        debug_dir = Path("debug_html")
-        debug_dir.mkdir(exist_ok=True)
+        debug_dir = get_debug_html_dir()
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        path = debug_dir / f"auctionninja_{label}_{ts}.html"
-        path.write_text(html, encoding="utf-8")
-        logger.info(f"Debug HTML saved: {path}")
+        fpath = debug_dir / f"auctionninja_{label}_{ts}.html"
+        fpath.write_text(html, encoding="utf-8")
+        logger.info(f"Debug HTML saved: {fpath}")
 
     def parse_listing(self, raw: dict) -> Optional[NormalizedListing]:
         if not raw.get("title"):

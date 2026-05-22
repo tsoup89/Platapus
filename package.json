@@ -1,0 +1,76 @@
+{
+  "name": "platapicker",
+  "version": "1.0.0",
+  "description": "Deal monitoring command center for resale, auction, and marketplace opportunities.",
+  "author": "Platapicker",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "npm run build:frontend && electron-builder --mac --dir",
+    "build:frontend": "cd frontend && npm install && npm run build",
+    "dev": "concurrently --names BACKEND,ELECTRON --prefix-colors cyan,yellow \"python run.py\" \"wait-on http://127.0.0.1:8000/api/overview && electron .\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.platapicker.app",
+    "productName": "Platapicker",
+    "copyright": "Copyright © 2025 Platapicker",
+    "directories": {
+      "buildResources": "assets",
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": ["**/*.py", "!**/__pycache__/**"]
+      },
+      {
+        "from": "frontend/dist",
+        "to": "frontend/dist"
+      },
+      {
+        "from": "run.py",
+        "to": "run.py"
+      },
+      {
+        "from": "platapicker.py",
+        "to": "platapicker.py"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "requirements.txt"
+      },
+      {
+        "from": ".venv",
+        "to": ".venv",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/playwright/driver/**",
+          "!**/.venv/lib/python*/site-packages/playwright/driver/**"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "darkModeSupport": true,
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["universal"]
+        }
+      ]
+    }
+  }
+}

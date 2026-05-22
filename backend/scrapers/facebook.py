@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Optional
 
 from .base import BaseScraper, NormalizedListing, ScraperHealth
+from backend.services.paths import get_screenshots_dir, get_browser_sessions_dir
 
 logger = logging.getLogger("platapicker.scrapers.facebook")
 
-SESSION_DIR = Path("browser_sessions/facebook")
-SCREENSHOT_DIR = Path("screenshots")
+SESSION_DIR = get_browser_sessions_dir() / "facebook"
+SCREENSHOT_DIR = get_screenshots_dir()
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 FB_MARKETPLACE_URL = "https://www.facebook.com/marketplace"
 

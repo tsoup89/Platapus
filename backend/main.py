@@ -53,8 +53,9 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api")
 
-# Serve frontend build if it exists
-frontend_dist = Path("frontend/dist")
+# Serve frontend build — respects FRONTEND_DIST env var (set by Electron when packaged)
+_frontend_dist_env = os.getenv("FRONTEND_DIST")
+frontend_dist = Path(_frontend_dist_env) if _frontend_dist_env else Path("frontend/dist")
 if frontend_dist.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
 

@@ -15,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .base import BaseScraper, NormalizedListing
+from backend.services.paths import get_screenshots_dir
 
 logger = logging.getLogger("platapicker.scrapers.craigslist")
 
