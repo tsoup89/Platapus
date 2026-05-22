@@ -402,7 +402,7 @@ class CraigslistScraper(BaseScraper):
         return {
             "id": listing_id,
             "title": title,
-            "price": price_text,
+            "price": price,
             "url": url,
             "image_url": image_url,
             "location": location,
@@ -455,9 +455,9 @@ class CraigslistScraper(BaseScraper):
             page = await context.new_page()
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=20_000)
 
-            if not resp or resp.status_code >= 400:
+            if not resp or resp.status >= 400:
                 logger.warning(
-                    f"Craigslist Playwright: HTTP {resp.status_code if resp else 'N/A'} "
+                    f"Craigslist Playwright: HTTP {resp.status if resp else 'N/A'} "
                     f"for subdomain '{subdomain}'"
                 )
                 return None
