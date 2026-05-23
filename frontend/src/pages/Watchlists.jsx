@@ -1,271 +1,563 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Edit, Trash2, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Plus, Edit2, Trash2, MapPin, DollarSign, Clock, ToggleLeft, ToggleRight } from 'lucide-react'
 import { getWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, toggleWatchlist, getWebhooks } from '../api'
 
+const SOURCES = ['facebook', 'auctionninja', 'craigslist']
+
+const SOURCE_LABELS = {
+  facebook: 'Facebook',
+  auctionninja: 'AuctionNinja',
+  craigslist: 'Craigslist',
+}
+
 const EMPTY_FORM = {
-  name: '', enabled: true, category: '', keywords: [], negative_keywords: [],
-  brands: [], aliases: [], locations: [], radius_miles: 50, min_price: 0,
-  max_price: 99999, sources_enabled: [], run_frequency_minutes: 60,
+  name: '', enabled: true, category: '',
+  keywords: [], negative_keywords: [], brands: [], aliases: [],
+  locations: [], radius_miles: 50,
+  min_price: 0, max_price: 99999,
+  sources_enabled: [], run_frequency_minutes: 60,
   min_rating_to_alert: 'GOOD', min_profit_margin: 0.20, min_profit_dollars: 50,
   discord_webhook_id: null, notes: '',
 }
 
-function tagsToList(str) {
-  return str.split(',').map(s => s.trim()).filter(Boolean)
+// ── Chip input ───────────────────────────────────────────────────────── //
+function ChipInput({ value = [], onChange, placeholder }) {
+  const [input, setInput] = useState('')
+  const wrapRef = useRef()
+  const inputRef = useRef()
+
+  const add = (raw) => {
+    const trimmed = (raw || input).trim().replace(/,$/, '')
+    if (trimmed && !value.includes(trimmed)) onChange([...value, trimmed])
+    setInput('')
+  }
+
+  const remove = (chip) => onChange(value.filter(c => c !== chip))
+
+  return (
+    <div
+      className="chip-input-wrap"
+      ref={wrapRef}
+      onClick={() => inputRef.current?.focus()}
+    >
+      {value.map(c => (
+        <span key={c} className="chip">
+          {c}
+          <button
+            type="button"
+            className="chip-remove"
+            onMouseDown={e => { e.preventDefault(); remove(c) }}
+          >×</button>
+        </span>
+      ))}
+      <input
+        ref={inputRef}
+        className="chip-input-field"
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add() }
+          if (e.key === 'Backspace' && !input && value.length) remove(value[value.length - 1])
+        }}
+        onBlur={() => { if (input.trim()) add() }}
+        placeholder={value.length === 0 ? placeholder : ''}
+      />
+    </div>
+  )
 }
 
-function listToTags(arr) {
-  return Array.isArray(arr) ? arr.join(', ') : ''
+// ── Source toggles ───────────────────────────────────────────────────── //
+function SourceToggles({ value, onChange }) {
+  const allOn = !value || value.length === 0
+
+  const toggle = (name) => {
+    if (allOn) {
+      onChange(SOURCES.filter(s => s !== name))
+    } else if (value.includes(name)) {
+      const next = value.filter(s => s !== name)
+      onChange(next.length === 0 ? SOURCES.filter(s => s !== name) : next)
+    } else {
+      const next = [...value, name]
+      onChange(next.length === SOURCES.length ? [] : next)
+    }
+  }
+
+  const isActive = (name) => allOn || value.includes(name)
+
+  return (
+    <div className="source-pills">
+      {SOURCES.map(s => (
+        <button
+          key={s}
+          type="button"
+          className={`source-pill${isActive(s) ? ' active' : ''}`}
+          onClick={() => toggle(s)}
+        >
+          {isActive(s) ? '✓ ' : ''}{SOURCE_LABELS[s]}
+        </button>
+      ))}
+    </div>
+  )
 }
 
-function WatchlistModal({ initial, webhooks, onClose, onSave }) {
-  const [form, setForm] = useState(initial || EMPTY_FORM)
+// ── Drawer ───────────────────────────────────────────────────────────── //
+function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
+  const [form, setForm] = useState(() =>
+    initial
+      ? { ...EMPTY_FORM, ...initial, locations: initial.locations || [] }
+      : { ...EMPTY_FORM }
+  )
   const [error, setError] = useState(null)
+  const [saving, setSaving] = useState(false)
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (!form.name.trim()) { setError('Name is required'); return }
+    setSaving(true)
     setError(null)
     try {
-      await onSave({
-        ...form,
-        keywords: typeof form.keywords === 'string' ? tagsToList(form.keywords) : form.keywords,
-        negative_keywords: typeof form.negative_keywords === 'string' ? tagsToList(form.negative_keywords) : form.negative_keywords,
-        brands: typeof form.brands === 'string' ? tagsToList(form.brands) : form.brands,
-        locations: typeof form.locations === 'string' ? tagsToList(form.locations) : form.locations,
-        sources_enabled: typeof form.sources_enabled === 'string' ? tagsToList(form.sources_enabled) : form.sources_enabled,
-      })
+      await onSave(form)
       onClose()
     } catch (err) {
       setError(err?.response?.data?.detail || String(err))
+    } finally {
+      setSaving(false)
     }
   }
 
+  const locationVal = Array.isArray(form.locations)
+    ? (form.locations[0] || '')
+    : (form.locations || '')
+
   return (
-    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
-        <div className="modal-header">
-          <div className="modal-title">{initial ? 'Edit Watchlist' : 'New Watchlist'}</div>
+    <>
+      <div className="drawer-overlay" onClick={onClose} />
+      <div className="drawer">
+        <div className="drawer-header">
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 17 }}>
+              {initial ? 'Edit Watchlist' : 'New Watchlist'}
+            </div>
+            {initial && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                {initial.name}
+              </div>
+            )}
+          </div>
           <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
         </div>
-        {error && <div className="error-box">{error}</div>}
-        <form onSubmit={handleSubmit}>
-          <div className="grid-2">
-            <div className="form-group">
-              <label>Name</label>
-              <input type="text" value={form.name} onChange={e => set('name', e.target.value)} required />
+
+        <div className="drawer-body">
+          {error && <div className="error-box">{error}</div>}
+          <form id="wl-form" onSubmit={handleSubmit}>
+
+            {/* BASICS */}
+            <div className="form-section">
+              <div className="form-section-title">Basics</div>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label>Name *</label>
+                  <input
+                    type="text"
+                    value={form.name}
+                    onChange={e => set('name', e.target.value)}
+                    placeholder="e.g. Espresso Machines"
+                    autoFocus
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Category</label>
+                  <select value={form.category || ''} onChange={e => set('category', e.target.value)}>
+                    <option value="">General</option>
+                    <option value="gamecube">GameCube</option>
+                    <option value="espresso">Espresso</option>
+                    <option value="outdoor_furniture">Outdoor Furniture</option>
+                  </select>
+                </div>
+              </div>
             </div>
-            <div className="form-group">
-              <label>Category</label>
-              <select value={form.category || ''} onChange={e => set('category', e.target.value)}>
-                <option value="">General</option>
-                <option value="gamecube">GameCube</option>
-                <option value="espresso">Espresso</option>
-                <option value="outdoor_furniture">Outdoor Furniture</option>
-              </select>
+
+            {/* KEYWORDS */}
+            <div className="form-section">
+              <div className="form-section-title">Keywords</div>
+              <div className="form-group">
+                <label>
+                  Search Keywords
+                  <span className="label-hint">press Enter or comma to add</span>
+                </label>
+                <ChipInput
+                  value={Array.isArray(form.keywords) ? form.keywords : []}
+                  onChange={v => set('keywords', v)}
+                  placeholder="Type a keyword and press Enter…"
+                />
+              </div>
+              <div className="form-group">
+                <label>
+                  Exclude Keywords
+                  <span className="label-hint">listings with these are skipped</span>
+                </label>
+                <ChipInput
+                  value={Array.isArray(form.negative_keywords) ? form.negative_keywords : []}
+                  onChange={v => set('negative_keywords', v)}
+                  placeholder="broken, parts only…"
+                />
+              </div>
+              <div className="form-group">
+                <label>Brands to Prioritize</label>
+                <ChipInput
+                  value={Array.isArray(form.brands) ? form.brands : []}
+                  onChange={v => set('brands', v)}
+                  placeholder="La Marzocco, Rancilio…"
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="form-group">
-            <label>Keywords (comma-separated)</label>
-            <textarea
-              value={listToTags(form.keywords)}
-              onChange={e => set('keywords', e.target.value)}
-              placeholder="espresso machine, coffee grinder, dual boiler"
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Negative Keywords (comma-separated)</label>
-            <textarea
-              value={listToTags(form.negative_keywords)}
-              onChange={e => set('negative_keywords', e.target.value)}
-              placeholder="broken, parts only, nespresso"
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Brands (comma-separated)</label>
-            <textarea
-              value={listToTags(form.brands)}
-              onChange={e => set('brands', e.target.value)}
-              placeholder="La Marzocco, Profitec, Rancilio"
-            />
-          </div>
-
-          <div className="form-group">
-            <label>Locations (comma-separated)</label>
-            <input
-              type="text"
-              value={listToTags(form.locations)}
-              onChange={e => set('locations', e.target.value)}
-              placeholder="New York, NY"
-            />
-          </div>
-
-          <div className="grid-3">
-            <div className="form-group">
-              <label>Radius (miles)</label>
-              <input type="number" value={form.radius_miles} onChange={e => set('radius_miles', +e.target.value)} />
+            {/* LOCATION */}
+            <div className="form-section">
+              <div className="form-section-title">Location &amp; Distance</div>
+              <div className="form-group">
+                <label>Search Location</label>
+                <input
+                  type="text"
+                  value={locationVal}
+                  onChange={e => set('locations', e.target.value ? [e.target.value] : [])}
+                  placeholder="New York, NY · Los Angeles, CA · Chicago, IL"
+                />
+                <div className="field-hint">Used for Facebook Marketplace and Craigslist</div>
+              </div>
+              <div className="form-group">
+                <label>Search Radius — <span style={{ color: 'var(--accent)', fontWeight: 700 }}>{form.radius_miles} miles</span></label>
+                <input
+                  type="range"
+                  className="range-input"
+                  min={5} max={200} step={5}
+                  value={form.radius_miles}
+                  onChange={e => set('radius_miles', +e.target.value)}
+                />
+                <div className="range-labels">
+                  <span>5 mi</span><span>50 mi</span><span>100 mi</span><span>200 mi</span>
+                </div>
+              </div>
             </div>
-            <div className="form-group">
-              <label>Min Price ($)</label>
-              <input type="number" value={form.min_price} onChange={e => set('min_price', +e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label>Max Price ($)</label>
-              <input type="number" value={form.max_price} onChange={e => set('max_price', +e.target.value)} />
-            </div>
-          </div>
 
-          <div className="grid-2">
-            <div className="form-group">
-              <label>Sources Enabled</label>
-              <input
-                type="text"
-                value={listToTags(form.sources_enabled)}
-                onChange={e => set('sources_enabled', e.target.value)}
-                placeholder="facebook, auctionninja"
+            {/* PRICE */}
+            <div className="form-section">
+              <div className="form-section-title">Price Range</div>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label>Min Price ($)</label>
+                  <input
+                    type="number" min={0}
+                    value={form.min_price}
+                    onChange={e => set('min_price', +e.target.value)}
+                    placeholder="0"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Max Price ($)</label>
+                  <input
+                    type="number" min={0}
+                    value={form.max_price >= 99999 ? '' : form.max_price}
+                    onChange={e => set('max_price', e.target.value ? +e.target.value : 99999)}
+                    placeholder="No limit"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* SOURCES */}
+            <div className="form-section">
+              <div className="form-section-title">Sources</div>
+              <div className="form-group">
+                <label>Search On</label>
+                <SourceToggles
+                  value={Array.isArray(form.sources_enabled) ? form.sources_enabled : []}
+                  onChange={v => set('sources_enabled', v)}
+                />
+                <div className="field-hint">All selected by default — deselect to restrict</div>
+              </div>
+              <div className="form-group">
+                <label>Check Every</label>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {[15, 30, 60, 120, 240].map(m => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={`btn btn-sm${form.run_frequency_minutes === m ? ' btn-primary' : ' btn-secondary'}`}
+                      onClick={() => set('run_frequency_minutes', m)}
+                    >
+                      {m < 60 ? `${m}m` : `${m / 60}h`}
+                    </button>
+                  ))}
+                  <span className="text-muted" style={{ fontSize: 12 }}>or</span>
+                  <input
+                    type="number" min={15}
+                    value={form.run_frequency_minutes}
+                    onChange={e => set('run_frequency_minutes', +e.target.value)}
+                    style={{ width: 70 }}
+                  />
+                  <span className="text-muted" style={{ fontSize: 12 }}>min</span>
+                </div>
+              </div>
+            </div>
+
+            {/* ALERTS */}
+            <div className="form-section">
+              <div className="form-section-title">Alerts</div>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label>Alert When Rating ≥</label>
+                  <select value={form.min_rating_to_alert} onChange={e => set('min_rating_to_alert', e.target.value)}>
+                    <option value="STEAL">🔥 STEAL only</option>
+                    <option value="GREAT">⭐ GREAT or better</option>
+                    <option value="GOOD">✅ GOOD or better</option>
+                    <option value="FAIR">🟡 FAIR or better</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Discord Webhook</label>
+                  <select
+                    value={form.discord_webhook_id || ''}
+                    onChange={e => set('discord_webhook_id', e.target.value ? +e.target.value : null)}
+                  >
+                    <option value="">None</option>
+                    {webhooks?.map(wh => (
+                      <option key={wh.id} value={wh.id}>{wh.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label>Min Profit Margin</label>
+                  <input
+                    type="number" step="0.01" min={0} max={1}
+                    value={form.min_profit_margin}
+                    onChange={e => set('min_profit_margin', +e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Min Profit ($)</label>
+                  <input
+                    type="number" min={0}
+                    value={form.min_profit_dollars}
+                    onChange={e => set('min_profit_dollars', +e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* NOTES */}
+            <div className="form-section">
+              <div className="form-section-title">Notes</div>
+              <textarea
+                value={form.notes}
+                onChange={e => set('notes', e.target.value)}
+                placeholder="Anything to remember about this watchlist…"
+                style={{ minHeight: 60 }}
               />
             </div>
-            <div className="form-group">
-              <label>Min Alert Rating</label>
-              <select value={form.min_rating_to_alert} onChange={e => set('min_rating_to_alert', e.target.value)}>
-                <option value="STEAL">STEAL only</option>
-                <option value="GREAT">GREAT+</option>
-                <option value="GOOD">GOOD+</option>
-                <option value="FAIR">FAIR+</option>
-              </select>
+
+          </form>
+        </div>
+
+        <div className="drawer-footer">
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" form="wl-form" className="btn btn-primary" disabled={saving}>
+            {saving ? 'Saving…' : initial ? 'Save Changes' : 'Create Watchlist'}
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ── Watchlist card ───────────────────────────────────────────────────── //
+function WatchlistCard({ wl, onEdit, onDelete, onToggle }) {
+  const activeSources = wl.sources_enabled?.length ? wl.sources_enabled : SOURCES
+  const location = wl.locations?.[0] || null
+  const priceLabel = wl.max_price >= 99999
+    ? `$${wl.min_price}+`
+    : `$${wl.min_price} – $${wl.max_price}`
+  const freqLabel = wl.run_frequency_minutes < 60
+    ? `${wl.run_frequency_minutes}m`
+    : `${wl.run_frequency_minutes / 60}h`
+
+  return (
+    <div className={`wl-card${!wl.enabled ? ' disabled' : ''}`}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Title row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 700, fontSize: 15 }}>{wl.name}</span>
+            {wl.category && <span className="badge badge-blue">{wl.category}</span>}
+            {wl.enabled
+              ? <span className="badge badge-green">Active</span>
+              : <span className="badge badge-gray">Paused</span>}
+          </div>
+
+          {/* Meta row */}
+          <div className="wl-meta">
+            {location && (
+              <span className="wl-meta-item">
+                <MapPin size={11} />
+                {location} · {wl.radius_miles}mi
+              </span>
+            )}
+            <span className="wl-meta-item">
+              <DollarSign size={11} />
+              {priceLabel}
+            </span>
+            <span className="wl-meta-item">
+              <Clock size={11} />
+              every {freqLabel}
+            </span>
+            <span className="wl-meta-item">
+              alert: <strong style={{ color: 'var(--text)', marginLeft: 2 }}>{wl.min_rating_to_alert}+</strong>
+            </span>
+          </div>
+
+          {/* Keywords */}
+          {wl.keywords?.length > 0 && (
+            <div className="tag-list" style={{ marginBottom: 8 }}>
+              {wl.keywords.slice(0, 7).map(k => (
+                <span key={k} className="tag">{k}</span>
+              ))}
+              {wl.keywords.length > 7 && (
+                <span className="text-muted" style={{ fontSize: 11 }}>
+                  +{wl.keywords.length - 7} more
+                </span>
+              )}
             </div>
-          </div>
+          )}
 
-          <div className="grid-2">
-            <div className="form-group">
-              <label>Min Profit Margin</label>
-              <input type="number" step="0.01" value={form.min_profit_margin} onChange={e => set('min_profit_margin', +e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label>Min Profit ($)</label>
-              <input type="number" value={form.min_profit_dollars} onChange={e => set('min_profit_dollars', +e.target.value)} />
-            </div>
+          {/* Active sources */}
+          <div className="wl-sources">
+            {activeSources.map(s => (
+              <span key={s} className="source-tag">{SOURCE_LABELS[s] || s}</span>
+            ))}
           </div>
+        </div>
 
-          <div className="form-group">
-            <label>Discord Webhook</label>
-            <select
-              value={form.discord_webhook_id || ''}
-              onChange={e => set('discord_webhook_id', e.target.value ? +e.target.value : null)}
-            >
-              <option value="">None</option>
-              {webhooks?.map(wh => <option key={wh.id} value={wh.id}>{wh.name}</option>)}
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label>Notes</label>
-            <textarea value={form.notes} onChange={e => set('notes', e.target.value)} />
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
-            <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary">Save</button>
-          </div>
-        </form>
+        {/* Action buttons */}
+        <div className="actions-row" style={{ flexShrink: 0 }}>
+          <button className="btn btn-sm btn-secondary" title="Edit" onClick={() => onEdit(wl)}>
+            <Edit2 size={13} />
+          </button>
+          <button
+            className="btn btn-sm btn-secondary"
+            title={wl.enabled ? 'Pause' : 'Resume'}
+            onClick={() => onToggle(wl.id)}
+          >
+            {wl.enabled
+              ? <ToggleRight size={14} color="var(--green)" />
+              : <ToggleLeft size={14} />}
+          </button>
+          <button
+            className="btn btn-sm btn-danger"
+            title="Delete"
+            onClick={() => window.confirm(`Delete "${wl.name}"?`) && onDelete(wl.id)}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
       </div>
     </div>
   )
 }
 
+// ── Page ─────────────────────────────────────────────────────────────── //
 export default function Watchlists() {
   const qc = useQueryClient()
-  const [modal, setModal] = useState(null)
+  const [drawer, setDrawer] = useState(null)
 
-  const { data: watchlists, isLoading } = useQuery({ queryKey: ['watchlists'], queryFn: getWatchlists })
-  const { data: webhooks } = useQuery({ queryKey: ['webhooks'], queryFn: getWebhooks })
+  const { data: watchlists = [], isLoading } = useQuery({
+    queryKey: ['watchlists'],
+    queryFn: getWatchlists,
+  })
+  const { data: webhooks = [] } = useQuery({
+    queryKey: ['webhooks'],
+    queryFn: getWebhooks,
+  })
 
-  const createMut = useMutation({ mutationFn: createWatchlist, onSuccess: () => qc.invalidateQueries(['watchlists']) })
-  const updateMut = useMutation({ mutationFn: ({ id, data }) => updateWatchlist(id, data), onSuccess: () => qc.invalidateQueries(['watchlists']) })
-  const deleteMut = useMutation({ mutationFn: deleteWatchlist, onSuccess: () => qc.invalidateQueries(['watchlists']) })
-  const toggleMut = useMutation({ mutationFn: toggleWatchlist, onSuccess: () => qc.invalidateQueries(['watchlists']) })
+  const createMut = useMutation({
+    mutationFn: createWatchlist,
+    onSuccess: () => qc.invalidateQueries(['watchlists']),
+  })
+  const updateMut = useMutation({
+    mutationFn: ({ id, data }) => updateWatchlist(id, data),
+    onSuccess: () => qc.invalidateQueries(['watchlists']),
+  })
+  const deleteMut = useMutation({
+    mutationFn: deleteWatchlist,
+    onSuccess: () => qc.invalidateQueries(['watchlists']),
+  })
+  const toggleMut = useMutation({
+    mutationFn: toggleWatchlist,
+    onSuccess: () => qc.invalidateQueries(['watchlists']),
+  })
 
-  if (isLoading) return <div className="loading">Loading watchlists...</div>
+  const handleSave = (data) =>
+    drawer?.mode === 'edit'
+      ? updateMut.mutateAsync({ id: drawer.watchlist.id, data })
+      : createMut.mutateAsync(data)
+
+  const activeCount = watchlists.filter(w => w.enabled).length
+  const pausedCount = watchlists.filter(w => !w.enabled).length
+
+  if (isLoading) return <div className="loading">Loading watchlists…</div>
 
   return (
     <div>
       <div className="page-header">
         <div>
           <div className="page-title">Watchlists</div>
-          <div className="page-subtitle">Configure what to search for and where to alert.</div>
+          <div className="page-subtitle">
+            {watchlists.length === 0
+              ? 'No watchlists yet — create one to start monitoring deals.'
+              : `${activeCount} active · ${pausedCount} paused`}
+          </div>
         </div>
-        <button className="btn btn-primary" onClick={() => setModal({ type: 'create' })}>
+        <button className="btn btn-primary" onClick={() => setDrawer({ mode: 'create' })}>
           <Plus size={14} /> New Watchlist
         </button>
       </div>
 
-      {modal?.type === 'create' && (
-        <WatchlistModal
+      {drawer && (
+        <WatchlistDrawer
+          initial={drawer.mode === 'edit' ? drawer.watchlist : undefined}
           webhooks={webhooks}
-          onClose={() => setModal(null)}
-          onSave={data => createMut.mutateAsync(data)}
-        />
-      )}
-      {modal?.type === 'edit' && (
-        <WatchlistModal
-          initial={modal.watchlist}
-          webhooks={webhooks}
-          onClose={() => setModal(null)}
-          onSave={data => updateMut.mutateAsync({ id: modal.watchlist.id, data })}
+          onClose={() => setDrawer(null)}
+          onSave={handleSave}
         />
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {watchlists?.map(wl => (
-          <div key={wl.id} className="card" style={{ opacity: wl.enabled ? 1 : 0.6 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-                  <strong style={{ fontSize: 15 }}>{wl.name}</strong>
-                  {wl.category && <span className="badge badge-blue">{wl.category}</span>}
-                  {wl.enabled
-                    ? <span className="badge badge-green">Active</span>
-                    : <span className="badge badge-gray">Disabled</span>}
-                </div>
-                <div className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
-                  Min alert: <strong>{wl.min_rating_to_alert}</strong> &nbsp;·&nbsp;
-                  Radius: <strong>{wl.radius_miles}mi</strong> &nbsp;·&nbsp;
-                  Price: <strong>${wl.min_price}–${wl.max_price}</strong> &nbsp;·&nbsp;
-                  Run every: <strong>{wl.run_frequency_minutes}min</strong>
-                </div>
-                {wl.keywords?.length > 0 && (
-                  <div className="tag-list">
-                    {wl.keywords.slice(0, 5).map(k => <span key={k} className="tag">{k}</span>)}
-                    {wl.keywords.length > 5 && <span className="text-muted" style={{ fontSize: 11 }}>+{wl.keywords.length - 5} more</span>}
-                  </div>
-                )}
-              </div>
-              <div className="actions-row">
-                <button className="btn btn-sm btn-secondary" onClick={() => toggleMut.mutate(wl.id)} title="Toggle enabled">
-                  {wl.enabled ? <ToggleRight size={14} color="var(--green)" /> : <ToggleLeft size={14} />}
-                </button>
-                <button className="btn btn-sm btn-secondary" onClick={() => setModal({ type: 'edit', watchlist: wl })}>
-                  <Edit size={13} />
-                </button>
-                <button
-                  className="btn btn-sm btn-danger"
-                  onClick={() => window.confirm(`Delete watchlist "${wl.name}"?`) && deleteMut.mutate(wl.id)}
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-            </div>
-          </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {watchlists.map(wl => (
+          <WatchlistCard
+            key={wl.id}
+            wl={wl}
+            onEdit={w => setDrawer({ mode: 'edit', watchlist: w })}
+            onDelete={id => deleteMut.mutate(id)}
+            onToggle={id => toggleMut.mutate(id)}
+          />
         ))}
-        {!watchlists?.length && (
+
+        {!watchlists.length && (
           <div className="empty-state">
             <div className="icon">📋</div>
-            <div>No watchlists yet. Create one to start monitoring deals.</div>
+            <div style={{ marginBottom: 16 }}>
+              Create a watchlist to tell Platapicker what products to look for.
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={() => setDrawer({ mode: 'create' })}
+            >
+              <Plus size={14} /> Create your first watchlist
+            </button>
           </div>
         )}
       </div>
