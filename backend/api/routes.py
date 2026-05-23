@@ -13,14 +13,14 @@ from backend.models import get_db
 from backend.models.models import (
     Watchlist, Source, ScraperRun, Listing, DealScore,
     DiscordWebhook, GameCubePrice, TitleMapping, AppSetting,
-    MarketValueCache,
+    MarketValueCache, ClaudeReview,
 )
 from backend.services.market_value import get_market_value
 from backend.api.schemas import (
     WatchlistCreate, WatchlistUpdate, WatchlistOut,
     DiscordWebhookCreate, DiscordWebhookOut,
     SourceOut, ScraperRunOut,
-    ListingOut, DealScoreOut,
+    ListingOut, DealScoreOut, ClaudeReviewOut,
     GameCubePriceOut, GameCubePriceUpdate, TitleMappingOut,
     OverviewStats,
 )
@@ -305,6 +305,85 @@ def get_listing_raw(listing_id: int, db: Session = Depends(get_db)):
     if not listing:
         raise HTTPException(404, "Listing not found")
     return listing.raw_payload
+
+
+@router.get("/listings/{listing_id}/claude-review", response_model=ClaudeReviewOut)
+def get_claude_review(listing_id: int, db: Session = Depends(get_db)):
+    review = db.query(ClaudeReview).filter(ClaudeReview.listing_id == listing_id).first()
+    if not review:
+        raise HTTPException(404, "No Claude review for this listing")
+    return ClaudeReviewOut.from_orm_safe(review)
+
+
+@router.post("/listings/{listing_id}/claude-review")
+def trigger_claude_review(
+    listing_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Queue an on-demand Claude review for a single listing."""
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+
+    settings = get_all_settings(db)
+    api_key = settings.get("claude_api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Claude API key not configured. Add it in Settings → Claude Review.")
+
+    def _do_review():
+        from backend.services.claude_analyzer import review_listing
+        from backend.models.database import SessionLocal
+        from datetime import datetime as _dt
+
+        rdb = SessionLocal()
+        try:
+            lst = rdb.query(Listing).filter(Listing.id == listing_id).first()
+            if not lst:
+                return
+            wl = lst.watchlist
+            rev = review_listing(
+                title=lst.title,
+                description=lst.description or "",
+                price=lst.price,
+                image_url=lst.image_url,
+                keywords=wl.keywords if wl else [],
+                category=wl.category if wl else None,
+                api_key=api_key,
+                model=settings.get("claude_model", "claude-haiku-4-5"),
+            )
+            existing = rdb.query(ClaudeReview).filter(
+                ClaudeReview.listing_id == listing_id
+            ).first()
+            if existing:
+                existing.approved = rev.approved
+                existing.confidence = rev.confidence
+                existing.summary = rev.summary
+                existing.model = rev.model
+                existing.error = rev.error
+                existing.photo_notes = rev.photo_notes
+                existing.flags = rev.flags
+                existing.positives = rev.positives
+                existing.created_at = _dt.utcnow()
+            else:
+                cr = ClaudeReview(
+                    listing_id=listing_id,
+                    approved=rev.approved,
+                    confidence=rev.confidence,
+                    summary=rev.summary,
+                    model=rev.model,
+                    error=rev.error,
+                    photo_notes=rev.photo_notes,
+                )
+                cr.flags = rev.flags
+                cr.positives = rev.positives
+                rdb.add(cr)
+            rdb.commit()
+        finally:
+            rdb.close()
+
+    background_tasks.add_task(_do_review)
+    return {"message": "Claude review queued.", "listing_id": listing_id}
 
 
 # ─────────────────────────────────────────────────────────────

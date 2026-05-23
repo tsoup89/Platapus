@@ -23,6 +23,8 @@ export const ignoreListing = (id) => api.post(`/listings/${id}/ignore`).then(r =
 export const unignoreListing = (id) => api.post(`/listings/${id}/unignore`).then(r => r.data)
 export const sendDiscord = (id) => api.post(`/listings/${id}/send-discord`).then(r => r.data)
 export const getListingRaw = (id) => api.get(`/listings/${id}/raw`).then(r => r.data)
+export const getClaudeReview = (id) => api.get(`/listings/${id}/claude-review`).then(r => r.data)
+export const triggerClaudeReview = (id) => api.post(`/listings/${id}/claude-review`).then(r => r.data)
 
 export const getWebhooks = () => api.get('/webhooks').then(r => r.data)
 export const createWebhook = (data) => api.post('/webhooks', data).then(r => r.data)

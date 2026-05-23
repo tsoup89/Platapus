@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { EyeOff, Eye, Send, ExternalLink, Info } from 'lucide-react'
-import { getListings, ignoreListing, unignoreListing, sendDiscord, getListingRaw, getWatchlists } from '../api'
+import { EyeOff, Eye, Send, ExternalLink, Info, Bot } from 'lucide-react'
+import { getListings, ignoreListing, unignoreListing, sendDiscord, getListingRaw, getWatchlists, triggerClaudeReview } from '../api'
 
 function RatingBadge({ rating }) {
   if (!rating) return <span className="text-muted">—</span>
@@ -34,6 +34,103 @@ function RawModal({ id, onClose }) {
           <pre style={{ fontSize: 12, overflowX: 'auto', background: 'var(--bg)', padding: 12, borderRadius: 6, color: 'var(--text-muted)' }}>
             {JSON.stringify(data, null, 2)}
           </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ClaudeReviewBadge({ review, listingId, onTrigger }) {
+  if (!review) {
+    return (
+      <button
+        className="btn btn-sm btn-secondary"
+        title="Run Claude review"
+        onClick={() => onTrigger(listingId)}
+        style={{ fontSize: 11, padding: '2px 6px' }}
+      >
+        <Bot size={11} /> Ask
+      </button>
+    )
+  }
+  if (review.error && !review.summary) {
+    return <span className="badge badge-gray" title={review.error}>Error</span>
+  }
+  const color = review.approved ? 'badge-green' : 'badge-red'
+  const icon = review.approved ? '✓' : '✗'
+  const label = review.approved ? 'OK' : 'Flag'
+  return (
+    <span
+      className={`badge ${color}`}
+      title={[
+        review.summary,
+        review.flags?.length ? `⚠ ${review.flags.join(', ')}` : '',
+        review.positives?.length ? `✓ ${review.positives.join(', ')}` : '',
+        review.photo_notes || '',
+      ].filter(Boolean).join('\n')}
+      style={{ cursor: 'help' }}
+    >
+      {icon} {label}
+    </span>
+  )
+}
+
+function ClaudeModal({ listing, onClose }) {
+  const review = listing.claude_review
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: 480 }}>
+        <div className="modal-header">
+          <div className="modal-title">🤖 Claude Review — {listing.title.slice(0, 40)}</div>
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+        </div>
+        {!review ? (
+          <div className="text-muted">No Claude review available yet.</div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 12 }}>
+              <span className={`badge ${review.approved ? 'badge-green' : 'badge-red'}`} style={{ marginRight: 8 }}>
+                {review.approved ? '✓ Approved' : '✗ Flagged'}
+              </span>
+              <span className="text-muted" style={{ fontSize: 12 }}>
+                {(review.confidence * 100).toFixed(0)}% confidence · {review.model}
+              </span>
+            </div>
+            {review.summary && (
+              <div style={{ fontSize: 13, marginBottom: 12, fontStyle: 'italic' }}>
+                "{review.summary}"
+              </div>
+            )}
+            {review.positives?.length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div className="card-title">✅ Positives</div>
+                <ul style={{ listStyle: 'none', padding: 0 }}>
+                  {review.positives.map((p, i) => (
+                    <li key={i} style={{ fontSize: 13, marginBottom: 4, color: 'var(--green)' }}>✓ {p}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {review.flags?.length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div className="card-title">⚠️ Flags</div>
+                <ul style={{ listStyle: 'none', padding: 0 }}>
+                  {review.flags.map((f, i) => (
+                    <li key={i} style={{ fontSize: 13, marginBottom: 4, color: 'var(--yellow)' }}>⚠ {f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {review.photo_notes && (
+              <div>
+                <div className="card-title">📷 Photo Notes</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{review.photo_notes}</div>
+              </div>
+            )}
+            {review.error && (
+              <div className="error-box" style={{ marginTop: 8, fontSize: 12 }}>Error: {review.error}</div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -91,6 +188,7 @@ export default function Listings() {
   const [filters, setFilters] = useState({ source: '', watchlist_id: '', ignored: false })
   const [rawModal, setRawModal] = useState(null)
   const [scoreModal, setScoreModal] = useState(null)
+  const [claudeModal, setClaudeModal] = useState(null)
   const [msg, setMsg] = useState(null)
 
   const { data: listings, isLoading } = useQuery({
@@ -117,6 +215,15 @@ export default function Listings() {
   const discordMut = useMutation({
     mutationFn: sendDiscord,
     onSuccess: () => { setMsg('✅ Sent to Discord!'); qc.invalidateQueries(['listings']) },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
+  const claudeMut = useMutation({
+    mutationFn: triggerClaudeReview,
+    onSuccess: (_, id) => {
+      setMsg('🤖 Claude review queued — refresh in a moment.')
+      setTimeout(() => qc.invalidateQueries(['listings']), 3000)
+    },
     onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
   })
 
@@ -161,6 +268,7 @@ export default function Listings() {
 
       {rawModal && <RawModal id={rawModal} onClose={() => setRawModal(null)} />}
       {scoreModal && <ScoreModal listing={scoreModal} onClose={() => setScoreModal(null)} />}
+      {claudeModal && <ClaudeModal listing={claudeModal} onClose={() => setClaudeModal(null)} />}
 
       {isLoading ? <div className="loading">Loading listings...</div> : (
         <div className="table-wrap">
@@ -174,6 +282,7 @@ export default function Listings() {
                 <th>Rating</th>
                 <th>Cons. Value</th>
                 <th>Target Buy</th>
+                <th>Claude</th>
                 <th>Location</th>
                 <th>First Seen</th>
                 <th>Alert</th>
@@ -200,6 +309,13 @@ export default function Listings() {
                   <td><RatingBadge rating={l.deal_score?.rating} /></td>
                   <td>{fmtMoney(l.deal_score?.conservative_value)}</td>
                   <td>{fmtMoney(l.deal_score?.target_buy_price)}</td>
+                  <td onClick={() => l.claude_review && setClaudeModal(l)} style={{ cursor: l.claude_review ? 'pointer' : 'default' }}>
+                    <ClaudeReviewBadge
+                      review={l.claude_review}
+                      listingId={l.id}
+                      onTrigger={(id) => claudeMut.mutate(id)}
+                    />
+                  </td>
                   <td className="text-muted" style={{ fontSize: 12 }}>{l.location || '—'}</td>
                   <td className="text-muted" style={{ fontSize: 12 }}>{fmtDate(l.first_seen_at)}</td>
                   <td>
@@ -227,7 +343,7 @@ export default function Listings() {
               ))}
               {!listings?.length && (
                 <tr>
-                  <td colSpan={11}>
+                  <td colSpan={12}>
                     <div className="empty-state">
                       <div className="icon">🔍</div>
                       <div>No listings yet. Run a scraper to start finding deals.</div>

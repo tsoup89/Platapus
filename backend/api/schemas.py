@@ -167,6 +167,38 @@ class DealScoreOut(BaseModel):
         )
 
 
+class ClaudeReviewOut(BaseModel):
+    id: int
+    listing_id: int
+    approved: bool
+    confidence: float
+    summary: str
+    flags: list[str]
+    positives: list[str]
+    photo_notes: str
+    model: str
+    error: Optional[str]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_orm_safe(cls, obj):
+        return cls(
+            id=obj.id,
+            listing_id=obj.listing_id,
+            approved=obj.approved,
+            confidence=obj.confidence,
+            summary=obj.summary or "",
+            flags=obj.flags,
+            positives=obj.positives,
+            photo_notes=obj.photo_notes or "",
+            model=obj.model or "",
+            error=obj.error,
+            created_at=obj.created_at,
+        )
+
+
 class ListingOut(BaseModel):
     id: int
     source: str
@@ -186,6 +218,7 @@ class ListingOut(BaseModel):
     alert_sent: bool
     alert_sent_at: Optional[datetime]
     deal_score: Optional[DealScoreOut]
+    claude_review: Optional[ClaudeReviewOut]
 
     model_config = {"from_attributes": True}
 
@@ -210,6 +243,7 @@ class ListingOut(BaseModel):
             alert_sent=obj.alert_sent,
             alert_sent_at=obj.alert_sent_at,
             deal_score=DealScoreOut.from_orm_safe(obj.deal_score) if obj.deal_score else None,
+            claude_review=ClaudeReviewOut.from_orm_safe(obj.claude_review) if obj.claude_review else None,
         )
 
 

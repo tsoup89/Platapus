@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Send, Clock, Play, RefreshCw } from 'lucide-react'
+import { Plus, Trash2, Send, Clock, Play, RefreshCw, Bot } from 'lucide-react'
 import {
   getSettings, updateSettings,
   getWebhooks, createWebhook, deleteWebhook, testWebhook,
@@ -409,6 +409,108 @@ function GlobalSettings() {
   )
 }
 
+function ClaudeSection() {
+  const qc = useQueryClient()
+  const [msg, setMsg] = useState(null)
+  const [showKey, setShowKey] = useState(false)
+
+  const { data: settings, isLoading } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
+  const [form, setForm] = useState(null)
+
+  const saveMut = useMutation({
+    mutationFn: updateSettings,
+    onSuccess: () => { qc.invalidateQueries(['settings']); setMsg('✅ Claude settings saved.') },
+    onError: (e) => setMsg(`❌ ${e.message}`),
+  })
+
+  if (isLoading) return null
+  const current = form || settings || {}
+  const set = (k, v) => setForm(f => ({ ...(f || settings), [k]: v }))
+
+  const MODELS = [
+    { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — Fastest, cheapest' },
+    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — Balanced' },
+    { id: 'claude-opus-4-7', label: 'Opus 4.7 — Most capable' },
+  ]
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Bot size={14} /> Claude Review Gate
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+        Before sending a Discord alert, Claude will analyze the listing photo and text to verify it's
+        a genuine deal. Rejected listings are saved to the database but not alerted. Fails open —
+        if the API is unreachable the alert still fires.
+      </div>
+
+      {msg && <div className={msg.startsWith('✅') ? 'success-box' : 'error-box'}>{msg}</div>}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <span className={`badge ${current.claude_enabled ? 'badge-green' : 'badge-gray'}`}>
+          {current.claude_enabled ? 'Enabled' : 'Disabled'}
+        </span>
+        <button
+          className={`btn btn-sm ${current.claude_enabled ? 'btn-secondary' : 'btn-primary'}`}
+          onClick={() => {
+            const next = !current.claude_enabled
+            set('claude_enabled', next)
+            api.post('/settings', { claude_enabled: next }).then(() => qc.invalidateQueries(['settings']))
+          }}
+        >
+          {current.claude_enabled ? 'Disable' : 'Enable'} Claude Review
+        </button>
+      </div>
+
+      <div className="grid-2">
+        <div className="form-group">
+          <label>Anthropic API Key</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              type={showKey ? 'text' : 'password'}
+              placeholder="sk-ant-..."
+              value={current.claude_api_key || ''}
+              onChange={e => set('claude_api_key', e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button
+              className="btn btn-sm btn-secondary"
+              onClick={() => setShowKey(v => !v)}
+              style={{ whiteSpace: 'nowrap' }}
+            >
+              {showKey ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <div className="field-hint">
+            Get your key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>console.anthropic.com</a>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label>Model</label>
+          <select
+            value={current.claude_model || 'claude-haiku-4-5'}
+            onChange={e => set('claude_model', e.target.value)}
+          >
+            {MODELS.map(m => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+          <div className="field-hint">Haiku is recommended — fast and cheap for screening.</div>
+        </div>
+      </div>
+
+      <button
+        className="btn btn-primary btn-sm"
+        onClick={() => saveMut.mutate({ claude_enabled: current.claude_enabled, claude_api_key: current.claude_api_key, claude_model: current.claude_model })}
+        disabled={saveMut.isPending}
+      >
+        Save Claude Settings
+      </button>
+    </div>
+  )
+}
+
 function MaintenanceSection() {
   const [msg, setMsg] = useState(null)
 
@@ -462,6 +564,7 @@ export default function SettingsPage() {
       <WebhooksSection />
       <FacebookSection />
       <GlobalSettings />
+      <ClaudeSection />
       <MaintenanceSection />
     </div>
   )

@@ -44,6 +44,9 @@ def send_deal_alert(
     reasons: Optional[list] = None,
     warnings: Optional[list] = None,
     image_url: Optional[str] = None,
+    claude_summary: Optional[str] = None,
+    claude_flags: Optional[list] = None,
+    claude_positives: Optional[list] = None,
 ) -> bool:
     emoji = RATING_EMOJI.get(rating, "📦")
 
@@ -82,6 +85,15 @@ def send_deal_alert(
         lines.append("**⚠️ Warnings:**")
         for w in warnings[:3]:
             lines.append(f"- {w}")
+    if claude_summary:
+        lines.append("")
+        lines.append(f"**🤖 Claude:** {claude_summary}")
+        if claude_flags:
+            for f_ in claude_flags[:3]:
+                lines.append(f"  ⚠ {f_}")
+        if claude_positives:
+            for p in claude_positives[:3]:
+                lines.append(f"  ✓ {p}")
     lines.append("")
     lines.append(f"🔗 {url}")
 

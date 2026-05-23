@@ -160,6 +160,7 @@ class Listing(Base):
 
     watchlist = relationship("Watchlist", back_populates="listings")
     deal_score = relationship("DealScore", back_populates="listing", uselist=False)
+    claude_review = relationship("ClaudeReview", back_populates="listing", uselist=False)
     price_history = relationship(
         "ListingPriceHistory",
         back_populates="listing",
@@ -290,6 +291,40 @@ class ListingPriceHistory(Base):
     recorded_at = Column(DateTime, default=now)
 
     listing = relationship("Listing", back_populates="price_history")
+
+
+class ClaudeReview(Base):
+    __tablename__ = "claude_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    listing_id = Column(Integer, ForeignKey("listings.id"), unique=True, nullable=False)
+    approved = Column(Boolean, default=True)
+    confidence = Column(Float, default=0.0)
+    summary = Column(Text, default="")
+    flags_json = Column(Text, default="[]")
+    positives_json = Column(Text, default="[]")
+    photo_notes = Column(Text, default="")
+    model = Column(String, default="")
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    listing = relationship("Listing", back_populates="claude_review")
+
+    @property
+    def flags(self):
+        return json.loads(self.flags_json or "[]")
+
+    @flags.setter
+    def flags(self, value):
+        self.flags_json = json.dumps(value)
+
+    @property
+    def positives(self):
+        return json.loads(self.positives_json or "[]")
+
+    @positives.setter
+    def positives(self, value):
+        self.positives_json = json.dumps(value)
 
 
 class MarketValueCache(Base):

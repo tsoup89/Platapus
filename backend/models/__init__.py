@@ -11,4 +11,5 @@ from .models import (
     AppSetting,
     ListingPriceHistory,
     MarketValueCache,
+    ClaudeReview,
 )

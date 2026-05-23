@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from backend.models.database import SessionLocal
 from backend.models.models import (
     Watchlist, Source, ScraperRun, Listing, DealScore, GameCubePrice, AppSetting,
-    ListingPriceHistory,
+    ListingPriceHistory, ClaudeReview,
 )
 from backend.services.market_value import get_market_value
 from backend.scrapers.base import NormalizedListing
@@ -205,7 +205,7 @@ def _should_alert(score: DealScore, watchlist: Watchlist) -> bool:
         return False
 
 
-def _send_alert(listing: Listing, score: DealScore, watchlist: Watchlist):
+def _send_alert(listing: Listing, score: DealScore, watchlist: Watchlist, claude_review=None):
     if not watchlist.discord_webhook or not watchlist.discord_webhook.enabled:
         return False
     return discord_service.send_deal_alert(
@@ -224,6 +224,9 @@ def _send_alert(listing: Listing, score: DealScore, watchlist: Watchlist):
         reasons=score.reasons,
         warnings=score.warnings,
         image_url=listing.image_url,
+        claude_summary=claude_review.summary if claude_review else None,
+        claude_flags=claude_review.flags if claude_review else None,
+        claude_positives=claude_review.positives if claude_review else None,
     )
 
 
@@ -300,14 +303,56 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
             if not listing.ignored and _should_alert(score, watchlist):
                 qualifying.append((listing, score))
 
+        # ── Claude review gate ────────────────────────────────────────────
+        claude_enabled = settings.get("claude_enabled", False)
+        claude_api_key = settings.get("claude_api_key", "")
+        qualifying_with_review: list[tuple] = []  # (listing, score, review_or_none)
+
+        if claude_enabled and claude_api_key:
+            from backend.services.claude_analyzer import review_listing
+            claude_model = settings.get("claude_model", "claude-haiku-4-5")
+            for listing, score in qualifying:
+                review = review_listing(
+                    title=listing.title,
+                    description=listing.description or "",
+                    price=listing.price,
+                    image_url=listing.image_url,
+                    keywords=watchlist.keywords,
+                    category=watchlist.category,
+                    api_key=claude_api_key,
+                    model=claude_model,
+                )
+                # Save review row
+                cr = ClaudeReview(
+                    listing_id=listing.id,
+                    approved=review.approved,
+                    confidence=review.confidence,
+                    summary=review.summary,
+                    model=review.model,
+                    error=review.error,
+                    photo_notes=review.photo_notes,
+                )
+                cr.flags = review.flags
+                cr.positives = review.positives
+                db.add(cr)
+                db.flush()
+                if review.approved:
+                    qualifying_with_review.append((listing, score, review))
+                else:
+                    logger.info(
+                        f"🤖 Claude rejected '{listing.title}': {review.summary}"
+                    )
+        else:
+            qualifying_with_review = [(l, s, None) for l, s in qualifying]
+
         batch_threshold = settings.get("alert_batch_threshold", 3)
 
-        if len(qualifying) > batch_threshold:
+        if len(qualifying_with_review) > batch_threshold:
             # Send one batch alert
             if watchlist.discord_webhook and watchlist.discord_webhook.enabled:
                 deals = []
-                for listing, score in qualifying:
-                    deals.append({
+                for listing, score, review in qualifying_with_review:
+                    deal = {
                         "title": listing.title,
                         "price": listing.price,
                         "rating": score.rating,
@@ -316,7 +361,10 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                         "estimated_profit": score.estimated_profit,
                         "url": listing.url or "",
                         "reasons": score.reasons or [],
-                    })
+                    }
+                    if review:
+                        deal["claude_summary"] = review.summary
+                    deals.append(deal)
                 run_summary = {
                     "raw_count": run.raw_count,
                     "parsed_count": run.parsed_count,
@@ -329,14 +377,14 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                     run_summary=run_summary,
                 )
                 if ok:
-                    for listing, _ in qualifying:
+                    for listing, _, __ in qualifying_with_review:
                         listing.alert_sent = True
                         listing.alert_sent_at = datetime.utcnow()
-                    alert_count = len(qualifying)
+                    alert_count = len(qualifying_with_review)
         else:
-            # Send individual alerts (existing behavior)
-            for listing, score in qualifying:
-                ok = _send_alert(listing, score, watchlist)
+            # Send individual alerts
+            for listing, score, review in qualifying_with_review:
+                ok = _send_alert(listing, score, watchlist, claude_review=review)
                 if ok:
                     listing.alert_sent = True
                     listing.alert_sent_at = datetime.utcnow()
