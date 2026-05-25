@@ -5,6 +5,7 @@ import {
   updateDoc,
   deleteDoc,
   getDocs,
+  getDoc,
   query,
   where,
   orderBy,
@@ -13,15 +14,12 @@ import {
 import { db } from './firebase';
 import type { CareTask, CareTaskType, Plant } from '../types';
 import { getPendingTasksForPlant } from '../utils/scheduleUtils';
+import { addCareHistoryEntry } from './careHistoryService';
 
 const TASKS_COL = 'careTasks';
 
-/**
- * Re-creates all future (incomplete) care tasks for a plant.
- * Called after adding/editing a plant or after marking care done.
- */
 export async function syncCareTasksForPlant(plant: Plant): Promise<void> {
-  // Delete existing pending tasks for this plant
+  // Delete all pending (incomplete) tasks for this plant
   const existingQ = query(
     collection(db, TASKS_COL),
     where('plantId', '==', plant.id),
@@ -31,19 +29,18 @@ export async function syncCareTasksForPlant(plant: Plant): Promise<void> {
   const batch = writeBatch(db);
   existing.docs.forEach((d) => batch.delete(d.ref));
 
-  // Generate new upcoming tasks from care profile
-  const pendingTasks = getPendingTasksForPlant(plant);
-  for (const t of pendingTasks) {
+  // Write fresh upcoming tasks derived from the care profile
+  for (const t of getPendingTasksForPlant(plant)) {
     const taskRef = doc(collection(db, TASKS_COL));
     batch.set(taskRef, {
-      plantId:      plant.id,
-      plantName:    plant.name,
-      plantPhotoUrl:plant.photoUrl ?? null,
-      userId:       plant.userId,
-      type:         t.type,
-      dueDate:      t.dueDate,
-      completed:    false,
-      completedDate:null,
+      plantId:       plant.id,
+      plantName:     plant.name,
+      plantPhotoUrl: plant.photoUrl ?? null,
+      userId:        plant.userId,
+      type:          t.type,
+      dueDate:       t.dueDate,
+      completed:     false,
+      completedDate: null,
     });
   }
 
@@ -54,25 +51,41 @@ export async function getUserTasks(
   userId: string,
   includeCompleted = false,
 ): Promise<CareTask[]> {
-  const constraints = [
+  const constraints: Parameters<typeof query>[1][] = [
     where('userId', '==', userId),
     orderBy('dueDate', 'asc'),
-  ] as Parameters<typeof query>[1][];
+  ];
+  if (!includeCompleted) constraints.unshift(where('completed', '==', false));
 
-  if (!includeCompleted) {
-    constraints.unshift(where('completed', '==', false));
-  }
-
-  const q = query(collection(db, TASKS_COL), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await getDocs(query(collection(db, TASKS_COL), ...constraints));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as CareTask));
 }
 
+/**
+ * Mark a task complete and log it to care history automatically.
+ */
 export async function completeTask(taskId: string): Promise<void> {
-  await updateDoc(doc(db, TASKS_COL, taskId), {
+  const taskRef  = doc(db, TASKS_COL, taskId);
+  const taskSnap = await getDoc(taskRef);
+  const now      = new Date().toISOString();
+
+  await updateDoc(taskRef, {
     completed:     true,
-    completedDate: new Date().toISOString(),
+    completedDate: now,
   });
+
+  // Write a care history entry so the calendar and timeline pick it up ✓
+  if (taskSnap.exists()) {
+    const task = { id: taskSnap.id, ...taskSnap.data() } as CareTask;
+    await addCareHistoryEntry({
+      plantId:       task.plantId,
+      plantName:     task.plantName,
+      plantPhotoUrl: task.plantPhotoUrl,
+      userId:        task.userId,
+      type:          task.type,
+      date:          now,
+    });
+  }
 }
 
 export async function snoozeTask(taskId: string, days: number): Promise<void> {

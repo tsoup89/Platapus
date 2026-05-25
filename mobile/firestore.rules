@@ -2,7 +2,6 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Users can only read/write their own data
     function isOwner(userId) {
       return request.auth != null && request.auth.uid == userId;
     }
@@ -13,17 +12,24 @@ service cloud.firestore {
 
     match /plants/{plantId} {
       allow read, write: if isOwner(resource.data.userId);
-      allow create: if isOwner(request.resource.data.userId);
+      allow create:      if isOwner(request.resource.data.userId);
     }
 
     match /rooms/{roomId} {
       allow read, write: if isOwner(resource.data.userId);
-      allow create: if isOwner(request.resource.data.userId);
+      allow create:      if isOwner(request.resource.data.userId);
     }
 
     match /careTasks/{taskId} {
       allow read, write: if isOwner(resource.data.userId);
+      allow create:      if isOwner(request.resource.data.userId);
+    }
+
+    // Care history: each entry is write-once from the app, read-only after
+    match /careHistory/{entryId} {
+      allow read:   if isOwner(resource.data.userId);
       allow create: if isOwner(request.resource.data.userId);
+      // No updates/deletes — history is immutable
     }
   }
 }

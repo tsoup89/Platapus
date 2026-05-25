@@ -5,11 +5,11 @@ import {
   updateDoc,
   deleteDoc,
   getDocs,
+  getDoc,
   query,
   where,
   orderBy,
   serverTimestamp,
-  Timestamp,
 } from 'firebase/firestore';
 import {
   ref,
@@ -21,10 +21,11 @@ import { db, storage } from './firebase';
 import type { Plant, CareProfile } from '../types';
 import { getPendingTasksForPlant } from '../utils/scheduleUtils';
 import { syncCareTasksForPlant } from './careTaskService';
+import { addCareHistoryEntry } from './careHistoryService';
 
 const PLANTS_COL = 'plants';
 
-// ─── Photo upload ────────────────────────────────────────────────────────────────────────
+// ─── Photo upload ───────────────────────────────────────────────────────────────
 
 export async function uploadPlantPhoto(
   userId: string,
@@ -42,21 +43,16 @@ export async function uploadPlantPhoto(
 
 async function deletePhotoIfExists(photoPath?: string) {
   if (!photoPath) return;
-  try {
-    await deleteObject(ref(storage, photoPath));
-  } catch {
-    // Photo may already be deleted; safe to ignore
-  }
+  try { await deleteObject(ref(storage, photoPath)); } catch { /* already gone */ }
 }
 
-// ─── CRUD ────────────────────────────────────────────────────────────────────────────────────────
+// ─── CRUD ───────────────────────────────────────────────────────────────────────────────────────
 
 export async function addPlant(
   userId: string,
   data: Omit<Plant, 'id' | 'userId' | 'dateAdded' | 'status'>,
   photoUri?: string,
 ): Promise<string> {
-  // Create the plant document first to get its ID
   const docRef = await addDoc(collection(db, PLANTS_COL), {
     ...data,
     userId,
@@ -65,16 +61,19 @@ export async function addPlant(
     createdAt: serverTimestamp(),
   });
 
-  // Upload photo if provided
   if (photoUri) {
     const { url, path } = await uploadPlantPhoto(userId, docRef.id, photoUri);
     await updateDoc(docRef, { photoUrl: url, photoPath: path });
   }
 
-  // Sync care tasks into Firestore
-  const plant = { ...data, id: docRef.id, userId, status: 'healthy' as const, dateAdded: new Date().toISOString() };
+  const plant: Plant = {
+    ...data,
+    id: docRef.id,
+    userId,
+    status: 'healthy',
+    dateAdded: new Date().toISOString(),
+  };
   await syncCareTasksForPlant(plant);
-
   return docRef.id;
 }
 
@@ -84,14 +83,12 @@ export async function updatePlant(
   newPhotoUri?: string,
 ): Promise<void> {
   const docRef = doc(db, PLANTS_COL, plantId);
-
   if (newPhotoUri) {
-    // Delete old photo if exists
-    const userId = updates.userId ?? '';
+    const snap = await getDoc(docRef);
+    const userId = snap.data()?.userId ?? '';
     const { url, path } = await uploadPlantPhoto(userId, plantId, newPhotoUri);
     updates = { ...updates, photoUrl: url, photoPath: path };
   }
-
   await updateDoc(docRef, { ...updates, updatedAt: serverTimestamp() });
 }
 
@@ -120,30 +117,44 @@ export async function getPlantsByRoom(userId: string, roomId: string): Promise<P
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as Plant));
 }
 
+/**
+ * Mark a specific care type as done today, update last-done date,
+ * resync future tasks, and log to care history.
+ */
 export async function markCareCompleted(
   plant: Plant,
   careType: 'water' | 'fertilize' | 'repot' | 'trim' | 'mist',
 ): Promise<void> {
-  const fieldMap: Record<string, keyof Pick<CareProfile,
-    'lastWatered' | 'lastFertilized' | 'lastRepotted' | 'lastTrimmed' | 'lastMisted'>> = {
+  const fieldMap = {
     water:     'lastWatered',
     fertilize: 'lastFertilized',
     repot:     'lastRepotted',
     trim:      'lastTrimmed',
     mist:      'lastMisted',
-  };
+  } as const;
+
   const field = fieldMap[careType];
-  const now = new Date().toISOString();
+  const now   = new Date().toISOString();
 
   await updateDoc(doc(db, PLANTS_COL, plant.id), {
     [`careProfile.${field}`]: now,
     updatedAt: serverTimestamp(),
   });
 
-  // Re-sync future task
+  // Re-sync the next scheduled task for this plant
   const updated: Plant = {
     ...plant,
     careProfile: { ...plant.careProfile, [field]: now },
   };
   await syncCareTasksForPlant(updated);
+
+  // Log to care history ✓
+  await addCareHistoryEntry({
+    plantId:      plant.id,
+    plantName:    plant.name,
+    plantPhotoUrl:plant.photoUrl,
+    userId:       plant.userId,
+    type:         careType,
+    date:         now,
+  });
 }
