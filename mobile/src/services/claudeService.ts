@@ -1,112 +1,35 @@
 /**
- * Claude AI service for plant photo analysis.
+ * Claude AI service — plant photo analysis and plant identification.
  *
- * Architecture:
- *  - In PRODUCTION: calls a Firebase Cloud Function which holds the API key securely.
- *  - In DEVELOPMENT: can call Claude directly if EXPO_PUBLIC_CLAUDE_API_KEY is set
- *    (never ship this to production — the key would be visible in the app bundle).
- *
- * The Cloud Function is at functions/index.js in this repo.
+ * Production: calls Firebase Cloud Functions (API key never in app bundle).
+ * Development: set EXPO_PUBLIC_CLAUDE_API_KEY in .env for direct calls.
  */
 
 import * as FileSystem from 'expo-file-system';
-import type { AIAnalysisResult, Plant } from '../types';
+import type { AIAnalysisResult, Plant, CareProfile, PlantDifficulty } from '../types';
 
 const FUNCTIONS_BASE_URL = process.env.EXPO_PUBLIC_FUNCTIONS_BASE_URL ?? '';
 const DEV_CLAUDE_KEY     = process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '';
+const MODEL              = 'claude-sonnet-4-6';
 
-// ─── Prompt builder ────────────────────────────────────────────────────────────────────────────────────
-
-function buildPrompt(plant?: Plant): string {
-  const context = plant
-    ? `Plant name: ${plant.name}\nSpecies: ${plant.species}\nCurrent watering schedule: every ${plant.careProfile.wateringFrequencyDays} days.`
-    : 'No plant context provided. Please identify the plant species if possible.';
-
-  return `You are an expert botanist and houseplant care advisor. Analyze this photo of a houseplant.
-
-${context}
-
-Provide your analysis as a JSON object with this exact structure:
-{
-  "healthStatus": "healthy" | "warning" | "critical",
-  "identifiedSpecies": "string or null if already known",
-  "summary": "2-3 sentence plain-English summary for a beginner plant owner",
-  "issues": [
-    {
-      "type": "string (e.g. overwatering, root rot, spider mites, sunburn, nutrient deficiency)",
-      "severity": "low" | "medium" | "high",
-      "description": "what you see and why it's a problem"
-    }
-  ],
-  "recommendations": [
-    {
-      "action": "concrete action to take",
-      "priority": "low" | "medium" | "high",
-      "reason": "why this helps"
-    }
-  ],
-  "scheduleAdjustments": [
-    {
-      "field": "wateringFrequencyDays" | "fertilizingFrequencyDays" | "trimmingFrequencyDays" | "mistingFrequencyDays",
-      "label": "human-readable field name",
-      "currentValue": number or null,
-      "recommendedValue": number,
-      "unit": "days",
-      "reason": "why this change helps"
-    }
-  ]
+export interface PlantIdentificationResult {
+  species: string;
+  commonName: string;
+  confidence: 'high' | 'medium' | 'low';
+  description: string;
+  toxicToPets: boolean;
+  difficulty: PlantDifficulty;
+  suggestedCareProfile: Omit<CareProfile,
+    'lastWatered' | 'lastFertilized' | 'lastRepotted' | 'lastTrimmed' | 'lastMisted'>;
 }
 
-Only include issues you can actually see in the photo. If the plant looks healthy, say so and provide an empty issues array.
-Respond ONLY with the JSON object, no markdown or extra text.`;
-}
-
-// ─── Image helper ────────────────────────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────────────────────────
 
 async function uriToBase64(uri: string): Promise<string> {
-  const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  return base64;
+  return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
 }
 
-// ─── Production path (Cloud Function) ───────────────────────────────────────────────────────────────────────
-
-async function analyzeViaCloudFunction(
-  base64Image: string,
-  plant?: Plant,
-): Promise<AIAnalysisResult> {
-  const url = `${FUNCTIONS_BASE_URL}/analyzePlant`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      imageBase64: base64Image,
-      mimeType: 'image/jpeg',
-      plantContext: plant
-        ? {
-            name:   plant.name,
-            species:plant.species,
-            careProfile: plant.careProfile,
-          }
-        : null,
-    }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Cloud function error ${response.status}: ${text}`);
-  }
-
-  return response.json() as Promise<AIAnalysisResult>;
-}
-
-// ─── Dev-only direct path ───────────────────────────────────────────────────────────────────────────────
-
-async function analyzeDirectly(
-  base64Image: string,
-  plant?: Plant,
-): Promise<AIAnalysisResult> {
+async function callClaude(messages: object[]): Promise<string> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -114,52 +37,121 @@ async function analyzeDirectly(
       'anthropic-version': '2023-06-01',
       'content-type':      'application/json',
     },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: {
-                type:       'base64',
-                media_type: 'image/jpeg',
-                data:        base64Image,
-              },
-            },
-            { type: 'text', text: buildPrompt(plant) },
-          ],
-        },
-      ],
-    }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 1024, messages }),
   });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Claude API error ${response.status}: ${text}`);
-  }
-
+  if (!response.ok) throw new Error(`Claude API ${response.status}: ${await response.text()}`);
   const data = await response.json();
-  const text = data.content?.[0]?.text ?? '{}';
-  return JSON.parse(text) as AIAnalysisResult;
+  return data.content?.[0]?.text ?? '{}';
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────────────────────────────────
+async function callFunction(endpoint: string, body: object): Promise<object> {
+  const url = `${FUNCTIONS_BASE_URL}/${endpoint}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Function error ${response.status}: ${await response.text()}`);
+  return response.json();
+}
+
+// ─── Analyze plant health ─────────────────────────────────────────────────────────────────────────────
+
+function buildAnalyzePrompt(plant?: Plant): string {
+  const context = plant
+    ? `Plant: ${plant.name} (${plant.species}). Watering: every ${plant.careProfile.wateringFrequencyDays} days.`
+    : 'No plant context. Identify the species if possible.';
+  return `You are an expert botanist. Analyze this houseplant photo.
+${context}
+
+Return ONLY this JSON:
+{
+  "healthStatus": "healthy"|"warning"|"critical",
+  "identifiedSpecies": string|null,
+  "summary": "2-3 sentences for a beginner",
+  "issues": [{"type":string,"severity":"low"|"medium"|"high","description":string}],
+  "recommendations": [{"action":string,"priority":"low"|"medium"|"high","reason":string}],
+  "scheduleAdjustments": [{"field":"wateringFrequencyDays"|"fertilizingFrequencyDays"|"trimmingFrequencyDays"|"mistingFrequencyDays","label":string,"currentValue":number|null,"recommendedValue":number,"unit":"days","reason":string}]
+}`;
+}
 
 export async function analyzePlantPhoto(
   imageUri: string,
   plant?: Plant,
 ): Promise<AIAnalysisResult> {
   const base64 = await uriToBase64(imageUri);
+  let result: AIAnalysisResult;
 
-  const result = FUNCTIONS_BASE_URL
-    ? await analyzeViaCloudFunction(base64, plant)
-    : await analyzeDirectly(base64, plant);
+  if (FUNCTIONS_BASE_URL) {
+    result = await callFunction('analyzePlant', {
+      imageBase64: base64, mimeType: 'image/jpeg',
+      plantContext: plant ? { name: plant.name, species: plant.species, careProfile: plant.careProfile } : null,
+    }) as AIAnalysisResult;
+  } else {
+    const text = await callClaude([{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+        { type: 'text', text: buildAnalyzePrompt(plant) },
+      ],
+    }]);
+    result = JSON.parse(text);
+  }
 
-  return {
-    ...result,
-    timestamp: new Date().toISOString(),
-  };
+  return { ...result, timestamp: new Date().toISOString() };
+}
+
+// ─── Identify unknown plant ─────────────────────────────────────────────────────────────────────────────
+
+const IDENTIFY_PROMPT = `You are an expert botanist. Identify this houseplant.
+
+Return ONLY this JSON (no markdown, no extra text):
+{
+  "species": "scientific name",
+  "commonName": "common English name",
+  "confidence": "high"|"medium"|"low",
+  "description": "1-2 sentences about this plant",
+  "toxicToPets": boolean,
+  "difficulty": "easy"|"medium"|"hard",
+  "suggestedCareProfile": {
+    "wateringFrequencyDays": number,
+    "lightRequirement": "low"|"medium"|"high"|"direct",
+    "humidityRequirement": "low"|"medium"|"high",
+    "fertilizingFrequencyDays": number,
+    "repottingFrequencyMonths": number,
+    "trimmingFrequencyDays": number|null,
+    "mistingFrequencyDays": number|null
+  }
+}`;
+
+export async function identifyPlantFromPhoto(
+  imageUri: string,
+): Promise<PlantIdentificationResult> {
+  const base64 = await uriToBase64(imageUri);
+  let result: PlantIdentificationResult;
+
+  if (FUNCTIONS_BASE_URL) {
+    result = await callFunction('identifyPlant', {
+      imageBase64: base64,
+      mimeType: 'image/jpeg',
+    }) as PlantIdentificationResult;
+  } else {
+    const text = await callClaude([{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+        { type: 'text', text: IDENTIFY_PROMPT },
+      ],
+    }]);
+    result = JSON.parse(text);
+  }
+
+  // Ensure null values become undefined
+  if (result.suggestedCareProfile) {
+    const cp = result.suggestedCareProfile as any;
+    if (!cp.trimmingFrequencyDays)  delete cp.trimmingFrequencyDays;
+    if (!cp.mistingFrequencyDays)   delete cp.mistingFrequencyDays;
+  }
+
+  return result;
 }

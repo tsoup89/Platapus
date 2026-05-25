@@ -1,11 +1,13 @@
 /**
  * Gamgee Firebase Cloud Functions
  *
- * Securely proxies Claude AI requests from the mobile app.
- * The ANTHROPIC_API_KEY is stored as a Firebase secret:
- *   firebase functions:secrets:set ANTHROPIC_API_KEY
+ * Two endpoints:
+ *  POST /analyzePlant   — diagnose plant health from photo
+ *  POST /identifyPlant  — identify unknown plant + suggest care profile
  *
- * Deploy with:
+ * Store API key:
+ *   firebase functions:secrets:set ANTHROPIC_API_KEY
+ * Deploy:
  *   cd functions && firebase deploy --only functions
  */
 
@@ -14,118 +16,119 @@ const { defineSecret } = require('firebase-functions/params');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
+const MODEL = 'claude-sonnet-4-6';
 
-/**
- * POST /analyzePlant
- * Body: { imageBase64: string, mimeType: string, plantContext?: object }
- * Returns: AIAnalysisResult JSON
- */
-exports.analyzePlant = onRequest(
-  {
-    secrets: [ANTHROPIC_API_KEY],
-    cors: true,
-    timeoutSeconds: 60,
-    memory: '256MiB',
-  },
-  async (req, res) => {
-    if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Method not allowed' });
-      return;
-    }
+const FUNCTION_OPTS = {
+  secrets:        [ANTHROPIC_API_KEY],
+  cors:           true,
+  timeoutSeconds: 60,
+  memory:         '256MiB',
+};
 
-    const { imageBase64, mimeType = 'image/jpeg', plantContext } = req.body;
-
-    if (!imageBase64) {
-      res.status(400).json({ error: 'imageBase64 is required' });
-      return;
-    }
-
-    const context = plantContext
-      ? `Plant name: ${plantContext.name}\nSpecies: ${plantContext.species}\nCurrent watering schedule: every ${plantContext.careProfile?.wateringFrequencyDays ?? '?'} days.`
-      : 'No plant context provided. Please identify the plant species if possible.';
-
-    const prompt = `You are an expert botanist and houseplant care advisor. Analyze this photo of a houseplant.
-
-${context}
-
-Provide your analysis as a JSON object with this exact structure:
-{
-  "healthStatus": "healthy" | "warning" | "critical",
-  "identifiedSpecies": "string or null if already known",
-  "summary": "2-3 sentence plain-English summary for a beginner plant owner",
-  "issues": [
-    {
-      "type": "string (e.g. overwatering, root rot, spider mites, sunburn, nutrient deficiency)",
-      "severity": "low" | "medium" | "high",
-      "description": "what you see and why it's a problem"
-    }
-  ],
-  "recommendations": [
-    {
-      "action": "concrete action to take",
-      "priority": "low" | "medium" | "high",
-      "reason": "why this helps"
-    }
-  ],
-  "scheduleAdjustments": [
-    {
-      "field": "wateringFrequencyDays" | "fertilizingFrequencyDays" | "trimmingFrequencyDays" | "mistingFrequencyDays",
-      "label": "human-readable field name",
-      "currentValue": number or null,
-      "recommendedValue": number,
-      "unit": "days",
-      "reason": "why this change helps"
-    }
-  ]
+async function callClaude(apiKey, messages) {
+  const client = new Anthropic({ apiKey });
+  const msg = await client.messages.create({
+    model:      MODEL,
+    max_tokens: 1024,
+    messages,
+  });
+  return msg.content?.[0]?.text ?? '{}';
 }
 
-Only include issues you can actually see in the photo. Respond ONLY with the JSON object.`;
+function safeJson(text) {
+  try { return JSON.parse(text); }
+  catch { return { error: 'Failed to parse AI response', raw: text.slice(0, 200) }; }
+}
 
-    try {
-      const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() });
+// ─── POST /analyzePlant ────────────────────────────────────────────────────────────────────────────
 
-      const message = await client.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type:       'base64',
-                  media_type: mimeType,
-                  data:       imageBase64,
-                },
-              },
-              { type: 'text', text: prompt },
-            ],
-          },
-        ],
-      });
+exports.analyzePlant = onRequest(FUNCTION_OPTS, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
-      const text = message.content?.[0]?.text ?? '{}';
+  const { imageBase64, mimeType = 'image/jpeg', plantContext } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
 
-      let analysis;
-      try {
-        analysis = JSON.parse(text);
-      } catch {
-        analysis = {
-          healthStatus: 'warning',
-          summary: text.slice(0, 300),
-          issues: [],
-          recommendations: [],
-          scheduleAdjustments: [],
-        };
-      }
+  const context = plantContext
+    ? `Plant: ${plantContext.name} (${plantContext.species}). Watering: every ${plantContext.careProfile?.wateringFrequencyDays ?? '?'} days.`
+    : 'No plant context. Identify the species if possible.';
 
-      analysis.timestamp = new Date().toISOString();
-      res.status(200).json(analysis);
+  const prompt = `You are an expert botanist. Analyze this houseplant photo.
+${context}
 
-    } catch (err) {
-      console.error('Claude API error:', err);
-      res.status(500).json({ error: err.message ?? 'AI analysis failed' });
+Return ONLY this JSON:
+{
+  "healthStatus": "healthy"|"warning"|"critical",
+  "identifiedSpecies": string|null,
+  "summary": "2-3 sentences for a beginner",
+  "issues": [{"type":string,"severity":"low"|"medium"|"high","description":string}],
+  "recommendations": [{"action":string,"priority":"low"|"medium"|"high","reason":string}],
+  "scheduleAdjustments": [{"field":"wateringFrequencyDays"|"fertilizingFrequencyDays"|"trimmingFrequencyDays"|"mistingFrequencyDays","label":string,"currentValue":number|null,"recommendedValue":number,"unit":"days","reason":string}]
+}`;
+
+  try {
+    const text   = await callClaude(ANTHROPIC_API_KEY.value(), [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+        { type: 'text', text: prompt },
+      ],
+    }]);
+    const result = safeJson(text);
+    result.timestamp = new Date().toISOString();
+    res.status(200).json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /identifyPlant ────────────────────────────────────────────────────────────────────────────
+
+exports.identifyPlant = onRequest(FUNCTION_OPTS, async (req, res) => {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+
+  const { imageBase64, mimeType = 'image/jpeg' } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+
+  const prompt = `You are an expert botanist. Identify this houseplant.
+
+Return ONLY this JSON:
+{
+  "species": "scientific name",
+  "commonName": "common English name",
+  "confidence": "high"|"medium"|"low",
+  "description": "1-2 sentences about this plant",
+  "toxicToPets": boolean,
+  "difficulty": "easy"|"medium"|"hard",
+  "suggestedCareProfile": {
+    "wateringFrequencyDays": number,
+    "lightRequirement": "low"|"medium"|"high"|"direct",
+    "humidityRequirement": "low"|"medium"|"high",
+    "fertilizingFrequencyDays": number,
+    "repottingFrequencyMonths": number,
+    "trimmingFrequencyDays": number or null,
+    "mistingFrequencyDays": number or null
+  }
+}`;
+
+  try {
+    const text   = await callClaude(ANTHROPIC_API_KEY.value(), [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+        { type: 'text', text: prompt },
+      ],
+    }]);
+    const result = safeJson(text);
+    // Clean up null optional fields
+    if (result.suggestedCareProfile) {
+      const cp = result.suggestedCareProfile;
+      if (!cp.trimmingFrequencyDays)  delete cp.trimmingFrequencyDays;
+      if (!cp.mistingFrequencyDays)   delete cp.mistingFrequencyDays;
     }
-  },
-);
+    res.status(200).json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
