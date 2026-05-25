@@ -15,6 +15,7 @@ import { usePlants } from '@/hooks/usePlants';
 import { useWeather } from '@/hooks/useWeather';
 import { CareTaskCard } from '@/components/CareTaskCard';
 import { Colors } from '@/constants/Colors';
+import { syncWidgetData } from '@/services/widgetService';
 import { format } from 'date-fns';
 
 export default function HomeScreen() {
@@ -31,10 +32,16 @@ export default function HomeScreen() {
     refreshWeather();
   }, []);
 
-  const firstName     = profile?.displayName?.split(' ')[0] ?? 'Gardener';
-  const today         = format(new Date(), 'EEEE, MMMM d');
-  const healthyCount  = plants.filter((p) => p.status === 'healthy').length;
-  const attentionCount= plants.filter((p) => p.status !== 'healthy').length;
+  // Keep the iOS widget in sync whenever the task / plant list changes
+  useEffect(() => {
+    const allPending = [...todayTasks, ...upcomingTasks];
+    syncWidgetData(plants, allPending).catch(() => {/* non-fatal */});
+  }, [plants, todayTasks, upcomingTasks]);
+
+  const firstName      = profile?.displayName?.split(' ')[0] ?? 'Gardener';
+  const today          = format(new Date(), 'EEEE, MMMM d');
+  const healthyCount   = plants.filter((p) => p.status === 'healthy').length;
+  const attentionCount = plants.filter((p) => p.status !== 'healthy').length;
 
   function handleRefreshAll() {
     refresh();
@@ -95,7 +102,7 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* Today’s tasks */}
+        {/* Today's tasks */}
         <Text style={styles.sectionTitle}>📅 Due Today</Text>
         {todayTasks.length === 0 ? (
           <View style={styles.emptyState}>
@@ -150,26 +157,19 @@ const styles = StyleSheet.create({
   scroll:  { flex: 1 },
   content: { padding: 20, paddingBottom: 40 },
 
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  greeting:     { fontSize: 24, fontWeight: '800', color: Colors.text },
-  date:         { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
-  analyzeBtn:   { backgroundColor: Colors.primary, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
-  analyzeBtnText:{ color: '#fff', fontWeight: '700', fontSize: 13 },
+  header:         { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  greeting:       { fontSize: 24, fontWeight: '800', color: Colors.text },
+  date:           { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  analyzeBtn:     { backgroundColor: Colors.primary, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8 },
+  analyzeBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
 
-  weatherBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 16,
-  },
-  weatherBannerRain: { backgroundColor: '#e8f4fd' },
-  weatherBannerDry:  { backgroundColor: Colors.warningLight },
-  weatherEmoji:      { fontSize: 22 },
-  weatherText:       { flex: 1, fontSize: 13, color: Colors.text, lineHeight: 19 },
+  weatherBanner:    { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 14, padding: 14, marginBottom: 16 },
+  weatherBannerRain:{ backgroundColor: '#e8f4fd' },
+  weatherBannerDry: { backgroundColor: Colors.warningLight },
+  weatherEmoji:     { fontSize: 22 },
+  weatherText:      { flex: 1, fontSize: 13, color: Colors.text, lineHeight: 19 },
 
-  statsRow: { flexDirection: 'row', gap: 10, marginBottom: 24 },
+  statsRow:   { flexDirection: 'row', gap: 10, marginBottom: 24 },
   statCard:   { flex: 1, borderRadius: 14, padding: 14, alignItems: 'center' },
   statNumber: { fontSize: 24, fontWeight: '800', color: Colors.text },
   statLabel:  { fontSize: 11, color: Colors.textSecondary, marginTop: 2, textAlign: 'center' },
@@ -180,7 +180,7 @@ const styles = StyleSheet.create({
   emptyText:    { fontSize: 14, color: Colors.textSecondary, textAlign: 'center' },
 
   addFirstPlantCard: { marginTop: 20, backgroundColor: Colors.primaryPastel, borderRadius: 20, padding: 32, alignItems: 'center', borderWidth: 2, borderColor: Colors.border, borderStyle: 'dashed' },
-  addFirstEmoji: { fontSize: 48 },
-  addFirstTitle: { fontSize: 18, fontWeight: '800', color: Colors.primaryDark, marginTop: 12 },
-  addFirstSub:   { fontSize: 14, color: Colors.primary, marginTop: 4 },
+  addFirstEmoji:     { fontSize: 48 },
+  addFirstTitle:     { fontSize: 18, fontWeight: '800', color: Colors.primaryDark, marginTop: 12 },
+  addFirstSub:       { fontSize: 14, color: Colors.primary, marginTop: 4 },
 });

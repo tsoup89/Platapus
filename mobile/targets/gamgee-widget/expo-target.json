@@ -1,0 +1,8 @@
+{
+  "type": "widget",
+  "deploymentTarget": "16.0",
+  "frameworks": ["WidgetKit", "SwiftUI"],
+  "entitlements": {
+    "com.apple.security.application-groups": ["group.com.gamgee.app"]
+  }
+}

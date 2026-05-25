@@ -13,6 +13,9 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.gamgee.app",
+      "entitlements": {
+        "com.apple.security.application-groups": ["group.com.gamgee.app"]
+      },
       "infoPlist": {
         "NSCameraUsageDescription": "Gamgee uses the camera to photograph your plants for AI health analysis.",
         "NSPhotoLibraryUsageDescription": "Gamgee accesses your photo library to use images of your plants.",
@@ -55,7 +58,8 @@
         {
           "locationWhenInUsePermission": "Gamgee uses your location to check local weather and adjust watering reminders."
         }
-      ]
+      ],
+      "@bacons/apple-targets"
     ],
     "experiments": {
       "typedRoutes": true
