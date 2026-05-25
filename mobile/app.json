@@ -16,7 +16,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Gamgee uses the camera to photograph your plants for AI health analysis.",
         "NSPhotoLibraryUsageDescription": "Gamgee accesses your photo library to use images of your plants.",
-        "NSPhotoLibraryAddUsageDescription": "Gamgee saves plant photos to your library."
+        "NSPhotoLibraryAddUsageDescription": "Gamgee saves plant photos to your library.",
+        "NSLocationWhenInUseUsageDescription": "Gamgee uses your location to check local weather and adjust watering reminders."
       }
     },
     "android": {
@@ -31,22 +32,28 @@
         "WRITE_EXTERNAL_STORAGE",
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
-        "USE_EXACT_ALARM"
+        "USE_EXACT_ALARM",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
       ]
     },
     "plugins": [
       "expo-router",
       [
         "expo-notifications",
-        {
-          "color": "#2d7a47"
-        }
+        { "color": "#2d7a47" }
       ],
       [
         "expo-image-picker",
         {
           "photosPermission": "Gamgee accesses your photos to use images of your plants.",
           "cameraPermission": "Gamgee uses the camera to photograph your plants for AI health analysis."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Gamgee uses your location to check local weather and adjust watering reminders."
         }
       ]
     ],
