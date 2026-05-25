@@ -1,90 +1,55 @@
-import type { Plant, CareTask, CareTaskType, CareProfile } from '../types';
+import type { Plant, CareProfile, CareTaskType } from '../types';
+import type { Hemisphere } from './seasonUtils';
+import { getSeasonalMultiplier } from './seasonUtils';
 import { nextDueDate } from './dateUtils';
 
-interface PendingTask {
-  type: CareTaskType;
-  dueDate: string;
-}
+// Updated by useAuth when the user profile loads so every task sync
+// automatically uses the correct hemisphere without prop-drilling.
+let _hemisphere: Hemisphere = 'north';
+export function setScheduleHemisphere(h: Hemisphere) { _hemisphere = h; }
+export function getScheduleHemisphere(): Hemisphere  { return _hemisphere; }
+
+interface PendingTask { type: CareTaskType; dueDate: string; }
 
 /**
- * Derives all upcoming care tasks from a plant's care profile.
- * These tasks are generated on-the-fly for display and
- * also persisted to Firestore by the care task service.
+ * Derives all upcoming care tasks from a plant’s care profile.
+ * Watering frequency is automatically adjusted for the current season.
  */
 export function getPendingTasksForPlant(plant: Plant): PendingTask[] {
-  const { careProfile } = plant;
+  const cp    = plant.careProfile;
   const tasks: PendingTask[] = [];
 
-  tasks.push({
-    type: 'water',
-    dueDate: nextDueDate(careProfile.lastWatered, careProfile.wateringFrequencyDays),
-  });
+  // Seasonal multiplier only applies to watering — fertilizing/repotting/etc.
+  // are driven by explicit schedules and don’t change with seasons.
+  const adjWaterDays = Math.max(
+    1,
+    Math.round(cp.wateringFrequencyDays * getSeasonalMultiplier(_hemisphere)),
+  );
 
-  if (careProfile.fertilizingFrequencyDays) {
-    tasks.push({
-      type: 'fertilize',
-      dueDate: nextDueDate(careProfile.lastFertilized, careProfile.fertilizingFrequencyDays),
-    });
-  }
+  tasks.push({ type: 'water', dueDate: nextDueDate(cp.lastWatered, adjWaterDays) });
 
-  if (careProfile.repottingFrequencyMonths) {
-    tasks.push({
-      type: 'repot',
-      dueDate: nextDueDate(
-        careProfile.lastRepotted,
-        careProfile.repottingFrequencyMonths * 30,
-      ),
-    });
-  }
-
-  if (careProfile.trimmingFrequencyDays) {
-    tasks.push({
-      type: 'trim',
-      dueDate: nextDueDate(careProfile.lastTrimmed, careProfile.trimmingFrequencyDays),
-    });
-  }
-
-  if (careProfile.mistingFrequencyDays) {
-    tasks.push({
-      type: 'mist',
-      dueDate: nextDueDate(careProfile.lastMisted, careProfile.mistingFrequencyDays),
-    });
-  }
+  if (cp.fertilizingFrequencyDays)
+    tasks.push({ type: 'fertilize', dueDate: nextDueDate(cp.lastFertilized, cp.fertilizingFrequencyDays) });
+  if (cp.repottingFrequencyMonths)
+    tasks.push({ type: 'repot', dueDate: nextDueDate(cp.lastRepotted, cp.repottingFrequencyMonths * 30) });
+  if (cp.trimmingFrequencyDays)
+    tasks.push({ type: 'trim', dueDate: nextDueDate(cp.lastTrimmed, cp.trimmingFrequencyDays) });
+  if (cp.mistingFrequencyDays)
+    tasks.push({ type: 'mist', dueDate: nextDueDate(cp.lastMisted, cp.mistingFrequencyDays) });
 
   return tasks;
 }
 
 export function careTaskLabel(type: CareTaskType): string {
-  const labels: Record<CareTaskType, string> = {
-    water: 'Water',
-    fertilize: 'Fertilize',
-    repot: 'Repot',
-    trim: 'Trim',
-    mist: 'Mist',
-    custom: 'Care',
-  };
-  return labels[type];
+  return { water: 'Water', fertilize: 'Fertilize', repot: 'Repot', trim: 'Trim', mist: 'Mist', custom: 'Care' }[type];
 }
 
 export function careTaskEmoji(type: CareTaskType): string {
-  const emojis: Record<CareTaskType, string> = {
-    water: '💧',
-    fertilize: '✨',
-    repot: '🪣',
-    trim: '✂️',
-    mist: '💨',
-    custom: '🌱',
-  };
-  return emojis[type];
+  return { water: '💧', fertilize: '✨', repot: '🪣', trim: '✂️', mist: '💨', custom: '🌱' }[type];
 }
 
 export function lightLabel(req: CareProfile['lightRequirement']): string {
-  return {
-    low: 'Low light',
-    medium: 'Indirect light',
-    high: 'Bright indirect',
-    direct: 'Direct sunlight',
-  }[req];
+  return { low: 'Low light', medium: 'Indirect light', high: 'Bright indirect', direct: 'Direct sunlight' }[req];
 }
 
 export function humidityLabel(req: CareProfile['humidityRequirement']): string {

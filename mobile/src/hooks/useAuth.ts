@@ -8,20 +8,21 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../services/firebase';
-import type { UserProfile, NotificationPreferences } from '../types';
+import type { UserProfile, NotificationPreferences, Hemisphere } from '../types';
+import { setScheduleHemisphere } from '../utils/scheduleUtils';
 
-const DEFAULT_NOTIFICATION_PREFS: NotificationPreferences = {
+const DEFAULT_PREFS = {
   enabled: true,
-  dailyReminderHour:   8,
+  dailyReminderHour: 8,
   dailyReminderMinute: 0,
   advanceNotificationHours: 0,
 };
 
 export function useAuth() {
-  const [user, setUser]       = useState<User | null>(null);
+  const [user,    setUser]    = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [error,   setError]   = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -29,7 +30,10 @@ export function useAuth() {
       if (firebaseUser) {
         const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
         if (snap.exists()) {
-          setProfile(snap.data() as UserProfile);
+          const p = snap.data() as UserProfile;
+          setProfile(p);
+          // Sync hemisphere into the scheduler module
+          setScheduleHemisphere(p.hemisphere ?? 'north');
         }
       } else {
         setProfile(null);
@@ -54,13 +58,15 @@ export function useAuth() {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       const newProfile: UserProfile = {
-        uid:         cred.user.uid,
+        uid: cred.user.uid,
         email,
         displayName,
-        notificationPreferences: DEFAULT_NOTIFICATION_PREFS,
+        hemisphere: 'north',
+        notificationPreferences: DEFAULT_PREFS,
       };
       await setDoc(doc(db, 'users', cred.user.uid), newProfile);
       setProfile(newProfile);
+      setScheduleHemisphere('north');
     } catch (e: any) {
       setError(e.message ?? 'Registration failed');
       throw e;
@@ -74,22 +80,20 @@ export function useAuth() {
 
   async function updateNotificationPrefs(prefs: NotificationPreferences) {
     if (!user) return;
-    await setDoc(
-      doc(db, 'users', user.uid),
-      { notificationPreferences: prefs },
-      { merge: true },
-    );
+    await setDoc(doc(db, 'users', user.uid), { notificationPreferences: prefs }, { merge: true });
     setProfile((p) => p ? { ...p, notificationPreferences: prefs } : p);
   }
 
+  async function updateHemisphere(hemisphere: Hemisphere) {
+    if (!user) return;
+    await setDoc(doc(db, 'users', user.uid), { hemisphere }, { merge: true });
+    setProfile((p) => p ? { ...p, hemisphere } : p);
+    setScheduleHemisphere(hemisphere);
+  }
+
   return {
-    user,
-    profile,
-    loading,
-    error,
-    signIn,
-    register,
-    signOut,
-    updateNotificationPrefs,
+    user, profile, loading, error,
+    signIn, register, signOut,
+    updateNotificationPrefs, updateHemisphere,
   };
 }

@@ -1,26 +1,25 @@
-// ─── Care profile ──────────────────────────────────────────────────────────────────────────────────────
+// ─── Care profile types ──────────────────────────────────────────────────────────────────────────────────────
 
-export type LightRequirement = 'low' | 'medium' | 'high' | 'direct';
+export type LightRequirement    = 'low' | 'medium' | 'high' | 'direct';
 export type HumidityRequirement = 'low' | 'medium' | 'high';
-export type PlantStatus = 'healthy' | 'needs_attention' | 'sick';
-export type CareTaskType = 'water' | 'fertilize' | 'repot' | 'trim' | 'mist' | 'custom';
-export type PlantDifficulty = 'easy' | 'medium' | 'hard';
+export type PlantStatus         = 'healthy' | 'needs_attention' | 'sick';
+export type CareTaskType        = 'water' | 'fertilize' | 'repot' | 'trim' | 'mist' | 'custom';
+export type PlantDifficulty     = 'easy' | 'medium' | 'hard';
+export type Hemisphere          = 'north' | 'south';
 
 export interface CareProfile {
   wateringFrequencyDays: number;
-  lightRequirement: LightRequirement;
-  humidityRequirement: HumidityRequirement;
-  // Optional recurring care tasks
+  lightRequirement:      LightRequirement;
+  humidityRequirement:   HumidityRequirement;
   fertilizingFrequencyDays?: number;
   repottingFrequencyMonths?: number;
-  trimmingFrequencyDays?: number;
-  mistingFrequencyDays?: number;
-  // Last performed dates (ISO strings)
-  lastWatered?: string;
+  trimmingFrequencyDays?:    number;
+  mistingFrequencyDays?:     number;
+  lastWatered?:    string;
   lastFertilized?: string;
-  lastRepotted?: string;
-  lastTrimmed?: string;
-  lastMisted?: string;
+  lastRepotted?:   string;
+  lastTrimmed?:    string;
+  lastMisted?:     string;
 }
 
 // ─── Core models ──────────────────────────────────────────────────────────────────────────────────────
@@ -28,13 +27,13 @@ export interface CareProfile {
 export interface Plant {
   id: string;
   userId: string;
-  name: string;          // User's nickname, e.g. "Big leafy boi"
-  species: string;       // Common or scientific name
+  name: string;
+  species: string;
   roomId: string;
-  roomName?: string;     // Denormalized for display
-  photoUrl?: string;     // Download URL from Firebase Storage
-  photoPath?: string;    // Storage path for deletion
-  dateAdded: string;     // ISO date
+  roomName?: string;
+  photoUrl?: string;
+  photoPath?: string;
+  dateAdded: string;
   notes?: string;
   careProfile: CareProfile;
   status: PlantStatus;
@@ -46,7 +45,7 @@ export interface Room {
   id: string;
   userId: string;
   name: string;
-  icon: string;          // Emoji icon
+  icon: string;
   plantCount: number;
   createdAt: string;
 }
@@ -58,7 +57,7 @@ export interface CareTask {
   plantPhotoUrl?: string;
   userId: string;
   type: CareTaskType;
-  dueDate: string;       // ISO date
+  dueDate: string;
   completedDate?: string;
   completed: boolean;
   notes?: string;
@@ -103,7 +102,7 @@ export interface AIAnalysisResult {
 
 export interface NotificationPreferences {
   enabled: boolean;
-  dailyReminderHour: number;   // 0–23
+  dailyReminderHour:   number;
   dailyReminderMinute: number;
   advanceNotificationHours: number;
 }
@@ -112,11 +111,12 @@ export interface UserProfile {
   uid: string;
   email: string;
   displayName?: string;
+  hemisphere: Hemisphere;          // 'north' | 'south' — for seasonal care
   notificationPreferences: NotificationPreferences;
   expoPushToken?: string;
 }
 
-// ─── Plant templates (database) ──────────────────────────────────────────────────────────────────────
+// ─── Plant templates ──────────────────────────────────────────────────────────────────────────────────
 
 export interface PlantTemplate {
   species: string;
