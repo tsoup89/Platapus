@@ -63,7 +63,7 @@ export interface CareTask {
   notes?: string;
 }
 
-// ─── AI Analysis ──────────────────────────────────────────────────────────────────────────────────────
+// ─── AI Health Analysis ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface AIIssue {
   type: string;
@@ -96,6 +96,34 @@ export interface AIAnalysisResult {
   recommendations: AIRecommendation[];
   scheduleAdjustments: ScheduleAdjustment[];
   summary: string;
+}
+
+// ─── Pest & Disease Detection ────────────────────────────────────────────────
+
+export type PestIssueType = 'pest' | 'disease' | 'deficiency';
+
+export interface PestOrDiseaseIssue {
+  /** e.g. "Spider mites", "Powdery mildew", "Nitrogen deficiency" */
+  name: string;
+  type: PestIssueType;
+  confidence: 'high' | 'medium' | 'low';
+  severity: 'low' | 'medium' | 'high';
+  /** What is visible in the photo */
+  symptoms: string;
+  /** Step-by-step treatment */
+  treatment: string;
+  /** How to prevent recurrence */
+  prevention: string;
+}
+
+export interface PestDetectionResult {
+  timestamp: string;
+  /** clean = no issues found; warning = early signs; infestation = active problem */
+  overallSeverity: 'clean' | 'warning' | 'infestation';
+  summary: string;
+  quarantineRecommended: boolean;
+  immediateActions: string[];
+  issues: PestOrDiseaseIssue[];
 }
 
 // ─── User / Settings ──────────────────────────────────────────────────────────────────────────────────

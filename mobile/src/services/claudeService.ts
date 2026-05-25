@@ -1,12 +1,12 @@
 /**
- * Claude AI service — plant photo analysis and plant identification.
+ * Claude AI service — plant photo analysis, identification, and pest detection.
  *
  * Production: calls Firebase Cloud Functions (API key never in app bundle).
  * Development: set EXPO_PUBLIC_CLAUDE_API_KEY in .env for direct calls.
  */
 
 import * as FileSystem from 'expo-file-system';
-import type { AIAnalysisResult, Plant, CareProfile, PlantDifficulty } from '../types';
+import type { AIAnalysisResult, Plant, CareProfile, PlantDifficulty, PestDetectionResult } from '../types';
 
 const FUNCTIONS_BASE_URL = process.env.EXPO_PUBLIC_FUNCTIONS_BASE_URL ?? '';
 const DEV_CLAUDE_KEY     = process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '';
@@ -37,7 +37,7 @@ async function callClaude(messages: object[]): Promise<string> {
       'anthropic-version': '2023-06-01',
       'content-type':      'application/json',
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1024, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 1500, messages }),
   });
   if (!response.ok) throw new Error(`Claude API ${response.status}: ${await response.text()}`);
   const data = await response.json();
@@ -101,6 +101,68 @@ export async function analyzePlantPhoto(
   return { ...result, timestamp: new Date().toISOString() };
 }
 
+// ─── Pest & Disease Detection ─────────────────────────────────────────────────────────────────────
+
+const PEST_DETECTION_PROMPT = `You are an expert plant pathologist and entomologist specializing in houseplants.
+Carefully examine this photo for any signs of pests, disease, or nutrient deficiencies.
+
+Look specifically for:
+PESTS: spider mites (fine webbing, stippled/bronzed leaves), aphids (soft clusters on new growth/stem tips), fungus gnats (soil surface, weak seedlings), scale insects (waxy brown/tan bumps on stems), mealybugs (white cottony masses in leaf axils), thrips (silvery streaking, distorted leaves), whiteflies (white cloud when leaf disturbed)
+DISEASES: root rot (yellowing + mushy stem base), powdery mildew (white powder on leaf surface), leaf spot (brown/black spots with yellow halo), botrytis/grey mold (fuzzy grey growth on dying tissue), rust (orange/brown pustules on undersides)
+DEFICIENCIES: overall yellowing (nitrogen), young leaves yellow/old green (iron), yellowing between veins (magnesium), purple tint on undersides (phosphorus)
+
+If the plant looks completely healthy with no signs of any issue, say so clearly and return an empty issues array.
+
+Return ONLY valid JSON (no markdown, no extra text):
+{
+  "overallSeverity": "clean"|"warning"|"infestation",
+  "summary": "2-3 beginner-friendly sentences describing what you see",
+  "quarantineRecommended": boolean,
+  "immediateActions": ["concrete step 1", "concrete step 2"],
+  "issues": [
+    {
+      "name": "Spider mites",
+      "type": "pest"|"disease"|"deficiency",
+      "confidence": "high"|"medium"|"low",
+      "severity": "low"|"medium"|"high",
+      "symptoms": "what is specifically visible in this photo",
+      "treatment": "step-by-step treatment, mention products if helpful (e.g. neem oil, insecticidal soap)",
+      "prevention": "how to prevent this from happening again"
+    }
+  ]
+}`;
+
+export async function detectPlantPests(
+  imageUri: string,
+  plant?: Plant,
+): Promise<PestDetectionResult> {
+  const base64 = await uriToBase64(imageUri);
+  let result: PestDetectionResult;
+
+  if (FUNCTIONS_BASE_URL) {
+    result = await callFunction('detectPests', {
+      imageBase64:  base64,
+      mimeType:     'image/jpeg',
+      plantName:    plant?.name,
+      plantSpecies: plant?.species,
+    }) as PestDetectionResult;
+  } else {
+    const context = plant
+      ? `\n\nPlant context: ${plant.name} (${plant.species}).`
+      : '';
+    const text = await callClaude([{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+        { type: 'text', text: PEST_DETECTION_PROMPT + context },
+      ],
+    }]);
+    result = JSON.parse(text);
+  }
+
+  return { ...result, timestamp: new Date().toISOString() };
+}
+
 // ─── Identify unknown plant ─────────────────────────────────────────────────────────────────────────────
 
 const IDENTIFY_PROMPT = `You are an expert botanist. Identify this houseplant.
@@ -119,8 +181,8 @@ Return ONLY this JSON (no markdown, no extra text):
     "humidityRequirement": "low"|"medium"|"high",
     "fertilizingFrequencyDays": number,
     "repottingFrequencyMonths": number,
-    "trimmingFrequencyDays": number|null,
-    "mistingFrequencyDays": number|null
+    "trimmingFrequencyDays": number or null,
+    "mistingFrequencyDays": number or null
   }
 }`;
 
