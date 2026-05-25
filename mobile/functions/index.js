@@ -1,5 +1,5 @@
 /**
- * Platapus Firebase Cloud Functions
+ * Gamgee Firebase Cloud Functions
  *
  * Securely proxies Claude AI requests from the mobile app.
  * The ANTHROPIC_API_KEY is stored as a Firebase secret:
@@ -23,7 +23,7 @@ const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
 exports.analyzePlant = onRequest(
   {
     secrets: [ANTHROPIC_API_KEY],
-    cors: true,                  // Allow mobile app origins
+    cors: true,
     timeoutSeconds: 60,
     memory: '256MiB',
   },
@@ -40,7 +40,6 @@ exports.analyzePlant = onRequest(
       return;
     }
 
-    // Build prompt
     const context = plantContext
       ? `Plant name: ${plantContext.name}\nSpecies: ${plantContext.species}\nCurrent watering schedule: every ${plantContext.careProfile?.wateringFrequencyDays ?? '?'} days.`
       : 'No plant context provided. Please identify the plant species if possible.';
@@ -108,12 +107,10 @@ Only include issues you can actually see in the photo. Respond ONLY with the JSO
 
       const text = message.content?.[0]?.text ?? '{}';
 
-      // Parse and validate JSON
       let analysis;
       try {
         analysis = JSON.parse(text);
       } catch {
-        // Claude returned invalid JSON — wrap it
         analysis = {
           healthStatus: 'warning',
           summary: text.slice(0, 300),

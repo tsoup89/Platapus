@@ -31,7 +31,6 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       await signIn(email.trim(), password);
-      // Navigation handled by _layout.tsx auth guard
     } catch (e: any) {
       Alert.alert('Sign in failed', e.message ?? 'Please check your credentials.');
     } finally {
@@ -48,7 +47,7 @@ export default function LoginScreen() {
         {/* Logo / Hero */}
         <View style={styles.hero}>
           <Text style={styles.logo}>🌿</Text>
-          <Text style={styles.appName}>Platapus</Text>
+          <Text style={styles.appName}>Gamgee</Text>
           <Text style={styles.tagline}>Keep your plants happy</Text>
         </View>
 

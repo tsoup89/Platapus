@@ -1,7 +1,7 @@
 {
-  "name": "platapus-functions",
+  "name": "gamgee-functions",
   "version": "1.0.0",
-  "description": "Firebase Cloud Functions for Platapus plant care app",
+  "description": "Firebase Cloud Functions for the Gamgee plant care app",
   "engines": { "node": "20" },
   "main": "index.js",
   "scripts": {

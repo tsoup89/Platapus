@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "Platapus",
-    "slug": "platapus",
+    "name": "Gamgee",
+    "slug": "gamgee",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -12,18 +12,18 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.platapus.app",
+      "bundleIdentifier": "com.gamgee.app",
       "infoPlist": {
-        "NSCameraUsageDescription": "Platapus uses the camera to photograph your plants for AI health analysis.",
-        "NSPhotoLibraryUsageDescription": "Platapus accesses your photo library to use images of your plants.",
-        "NSPhotoLibraryAddUsageDescription": "Platapus saves plant photos to your library."
+        "NSCameraUsageDescription": "Gamgee uses the camera to photograph your plants for AI health analysis.",
+        "NSPhotoLibraryUsageDescription": "Gamgee accesses your photo library to use images of your plants.",
+        "NSPhotoLibraryAddUsageDescription": "Gamgee saves plant photos to your library."
       }
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#1a5e3a"
       },
-      "package": "com.platapus.app",
+      "package": "com.gamgee.app",
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "CAMERA",
@@ -45,8 +45,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Platapus accesses your photos to use images of your plants.",
-          "cameraPermission": "Platapus uses the camera to photograph your plants for AI health analysis."
+          "photosPermission": "Gamgee accesses your photos to use images of your plants.",
+          "cameraPermission": "Gamgee uses the camera to photograph your plants for AI health analysis."
         }
       ]
     ],

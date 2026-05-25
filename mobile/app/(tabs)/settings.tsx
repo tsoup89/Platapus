@@ -31,11 +31,7 @@ export default function SettingsScreen() {
       'Are you sure you want to sign out?',
       [
         { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Sign Out',
-          style: 'destructive',
-          onPress: signOut,
-        },
+        { text: 'Sign Out', style: 'destructive', onPress: signOut },
       ],
     );
   }
@@ -86,7 +82,7 @@ export default function SettingsScreen() {
           <Text style={styles.sectionTitle}>About</Text>
           <View style={styles.row}>
             <Text style={styles.rowLabel}>App</Text>
-            <Text style={styles.rowValue}>Platapus v1.0</Text>
+            <Text style={styles.rowValue}>Gamgee v1.0</Text>
           </View>
           <View style={[styles.row, styles.rowLast]}>
             <Text style={styles.rowLabel}>AI powered by</Text>

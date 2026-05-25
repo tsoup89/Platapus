@@ -1,4 +1,4 @@
-# 🌿 Platapus Mobile — Plant Care App
+# 🌿 Gamgee — Plant Care App
 
 A smart iPhone app to keep your houseplants alive and thriving. Powered by Claude AI for photo-based plant health analysis.
 
@@ -83,6 +83,12 @@ mobile/
 └── functions/              # Firebase Cloud Functions
 ```
 
+## Environment Variables
+
+See `.env.example` for all required variables.
+
+> ⚠️ **Never commit your `.env` file.** The Claude API key lives only as a Firebase Functions secret.
+
 ## Building for iPhone (TestFlight)
 
 ```bash
@@ -91,8 +97,6 @@ eas build:configure
 eas build --platform ios
 eas submit --platform ios
 ```
-
-> ⚠️ **Never commit your `.env` file.** The Claude API key lives only as a Firebase Functions secret.
 
 ## Roadmap
 
