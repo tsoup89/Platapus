@@ -139,6 +139,44 @@ class FacebookScraper(BaseScraper):
     # Login (interactive — opens visible browser)
     # ------------------------------------------------------------------ #
 
+    async def _auto_login(self) -> bool:
+        """Attempt credential-based login using FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.
+        Returns True if login succeeded."""
+        email = os.getenv("FACEBOOK_EMAIL", "").strip()
+        password = os.getenv("FACEBOOK_PASSWORD", "").strip()
+        if not email or not password:
+            logger.warning("Facebook: auto-login skipped — FACEBOOK_EMAIL/FACEBOOK_PASSWORD not set in .env")
+            return False
+
+        logger.info("Facebook: attempting auto-login with credentials")
+        try:
+            await self._page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=30_000)
+            await asyncio.sleep(random.uniform(1.5, 3.0))
+
+            await self._page.fill("input[name='email']", email)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await self._page.fill("input[name='pass']", password)
+            await asyncio.sleep(random.uniform(0.5, 1.2))
+            await self._page.click("button[name='login']")
+
+            # Wait for redirect away from login page
+            await self._page.wait_for_url(lambda url: "login" not in url, timeout=20_000)
+            await asyncio.sleep(random.uniform(2.0, 4.0))
+
+            status = await self._check_login_status()
+            if status == "logged_in":
+                await self._save_session()
+                logger.info("Facebook: auto-login succeeded, session saved")
+                return True
+            else:
+                logger.warning(f"Facebook: auto-login failed — status={status}")
+                await self._save_screenshot("auto_login_failed")
+                return False
+        except Exception as e:
+            logger.warning(f"Facebook: auto-login error: {e}")
+            await self._save_screenshot("auto_login_error")
+            return False
+
     async def interactive_login(self):
         """Open visible browser for user to log in manually."""
         print("\n🦆 Opening Facebook Marketplace in browser...")
@@ -182,9 +220,18 @@ class FacebookScraper(BaseScraper):
             self._session_status = status
 
             if status == "needs_login":
-                logger.warning("Facebook: session expired — needs login")
+                logger.warning("Facebook: session expired — attempting auto-login")
                 await self._save_screenshot("needs_login")
-                return []
+                recovered = await self._auto_login()
+                if not recovered:
+                    return []
+                # Re-navigate to the search after login
+                await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+                if self.slow_mode:
+                    await asyncio.sleep(random.uniform(self.min_delay, self.max_delay))
+                status = await self._check_login_status()
+                if status != "logged_in":
+                    return []
 
             if status == "possible_block":
                 logger.warning("Facebook: possible block/rate limit detected")
@@ -250,7 +297,7 @@ class FacebookScraper(BaseScraper):
 
     async def _parse_card_element(self, el) -> Optional[dict]:
         try:
-            # Try to get link
+            # Get the link — the card element itself or a child
             href = await el.get_attribute("href")
             if not href:
                 link = await el.query_selector("a[href*='/marketplace/item/']")
@@ -265,22 +312,43 @@ class FacebookScraper(BaseScraper):
                 m = re.search(r"/item/(\d+)", url)
                 listing_id = m.group(1) if m else None
 
-            # Title
-            title_el = await el.query_selector("[data-testid='marketplace_listing_title'], span, h2, h3")
-            title = await title_el.inner_text() if title_el else None
-
-            # Price
-            price_el = await el.query_selector("[data-testid='marketplace_listing_price'], span")
-            price_text = await price_el.inner_text() if price_el else ""
-            price = self._extract_price(price_text)
-
-            # Location
-            loc_el = await el.query_selector("[data-testid='marketplace_listing_city']")
-            location = await loc_el.inner_text() if loc_el else None
-
             # Image
             img_el = await el.query_selector("img")
             image_url = await img_el.get_attribute("src") if img_el else None
+
+            # Pull all visible text lines from the card, then parse title/price/location
+            raw_text = (await el.inner_text()).strip()
+            lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+
+            # Price is any line starting with $ or matching a currency pattern
+            price = None
+            price_line_idx = None
+            for i, ln in enumerate(lines):
+                extracted = self._extract_price(ln)
+                if extracted is not None and ln.lstrip().startswith("$"):
+                    price = extracted
+                    price_line_idx = i
+                    break
+
+            # Title is the longest non-price, non-location line (usually the first substantive one)
+            title = None
+            for i, ln in enumerate(lines):
+                if i == price_line_idx:
+                    continue
+                # Skip very short lines or lines that look like prices/distances
+                if len(ln) < 3 or re.match(r"^\$[\d,]+", ln) or re.match(r"^\d+\s*(mi|km|miles)", ln, re.I):
+                    continue
+                title = ln
+                break
+
+            # Location is typically the last short line that isn't the title or price
+            location = None
+            for ln in reversed(lines):
+                if ln == title or (price_line_idx is not None and ln == lines[price_line_idx]):
+                    continue
+                if 2 < len(ln) < 60 and not re.match(r"^\$", ln):
+                    location = ln
+                    break
 
             if not title or not url:
                 return None

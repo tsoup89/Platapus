@@ -16,9 +16,11 @@ RATING_EMOJI = {
 }
 
 
+_HEADERS = {"User-Agent": "DiscordBot (platapicker, 1.0)", "Content-Type": "application/json"}
+
 def _post_webhook(webhook_url: str, payload: dict) -> bool:
     try:
-        resp = httpx.post(webhook_url, json=payload, timeout=10)
+        resp = httpx.post(webhook_url, json=payload, headers=_HEADERS, timeout=10)
         if resp.status_code in (200, 204):
             return True
         logger.error(f"Discord webhook returned {resp.status_code}: {resp.text}")

@@ -49,6 +49,28 @@ def _seed_sources(db: Session):
                 "request_delay_seconds": 2,
             }),
         ),
+        Source(
+            name="offerup",
+            enabled=True,
+            type="offerup",
+            status="unknown",
+            config_json=json.dumps({
+                "min_delay_seconds": 2,
+                "max_delay_seconds": 5,
+                "max_listings_per_run": 60,
+            }),
+        ),
+        Source(
+            name="mercari",
+            enabled=True,
+            type="mercari",
+            status="unknown",
+            config_json=json.dumps({
+                "min_delay_seconds": 2,
+                "max_delay_seconds": 5,
+                "max_listings_per_run": 60,
+            }),
+        ),
     ]
 
     for source in sources:

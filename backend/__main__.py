@@ -93,6 +93,28 @@ def cmd_facebook_login():
     scraper.login()
 
 
+@cli.command("mercari-login")
+def cmd_mercari_login():
+    """Open browser for Mercari login."""
+    from backend.scrapers.mercari import MercariScraper
+    scraper = MercariScraper()
+    scraper.login()
+
+
+@cli.command("mercari-status")
+def cmd_mercari_status():
+    """Show Mercari scraper session status."""
+    from backend.services.paths import get_browser_sessions_dir
+    session_file = get_browser_sessions_dir() / "mercari" / "session.json"
+    if session_file.exists():
+        size = session_file.stat().st_size
+        click.echo(f"✅ Mercari session file found ({size} bytes)")
+        click.echo("   Run a test scrape to verify the session is still valid.")
+    else:
+        click.echo("❌ No Mercari session found.")
+        click.echo("   Run: python -m platapicker mercari-login")
+
+
 @cli.command("facebook-status")
 def cmd_facebook_status():
     """Show Facebook scraper session status."""
@@ -146,7 +168,10 @@ def cmd_import_gamecube(csv_path):
     db = SessionLocal()
     try:
         with open(csv_path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
+            # Skip any leading blank rows before the real header
+            lines = [l for l in f.readlines() if l.strip().strip(",")]
+            import io
+            reader = csv.DictReader(io.StringIO("".join(lines)))
             imported = updated = 0
             CORE_TITLES = [
                 "mario kart", "super smash bros", "mario party", "super mario sunshine",
@@ -155,7 +180,7 @@ def cmd_import_gamecube(csv_path):
             ]
 
             for row in reader:
-                title = (row.get("Game") or row.get("Title") or "").strip()
+                title = (row.get("Game") or row.get("Title") or row.get("Name") or "").strip()
                 if not title:
                     continue
 

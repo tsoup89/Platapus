@@ -11,7 +11,7 @@
  *  5. On quit, send SIGTERM to the backend process
  */
 
-const { app, BrowserWindow, Menu, shell, dialog } = require('electron')
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain, clipboard } = require('electron')
 const { spawn } = require('child_process')
 const path  = require('path')
 const http  = require('http')
@@ -176,6 +176,10 @@ function waitForBackend(maxRetries = 50, intervalMs = 400) {
 
 // ── Windows ──────────────────────────────────────────────────────────── //
 
+function getIconPath() {
+  return path.join(getResourcesPath(), 'assets', 'icon.png')
+}
+
 function createLoadingWindow() {
   loadingWindow = new BrowserWindow({
     width          : 400,
@@ -184,6 +188,7 @@ function createLoadingWindow() {
     resizable      : false,
     center         : true,
     backgroundColor: '#0f1117',
+    icon           : getIconPath(),
     webPreferences : { contextIsolation: true },
   })
   loadingWindow.loadFile(path.join(__dirname, 'loading.html'))
@@ -197,6 +202,7 @@ function createMainWindow() {
     minHeight     : 600,
     titleBarStyle : 'hiddenInset',   // native Mac traffic-lights, no title bar
     backgroundColor: '#0f1117',
+    icon          : getIconPath(),
     show          : false,           // reveal only after content loads
     webPreferences: {
       preload          : path.join(__dirname, 'preload.js'),
@@ -303,9 +309,20 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+// ── IPC handlers ────────────────────────────────────────────────────── //
+
+ipcMain.handle('clipboard-write', (_event, text) => {
+  clipboard.writeText(text)
+})
+
+ipcMain.handle('open-external', (_event, url) => {
+  shell.openExternal(url)
+})
+
 // ── App lifecycle ────────────────────────────────────────────────────── //
 
 app.whenReady().then(async () => {
+  if (app.dock) app.dock.setIcon(getIconPath())
   createLoadingWindow()
   startBackend()
 

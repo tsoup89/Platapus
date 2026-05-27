@@ -1,14 +1,51 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Edit2, Trash2, MapPin, DollarSign, Clock, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Plus, Edit2, Trash2, MapPin, DollarSign, Clock, ToggleLeft, ToggleRight, Sparkles, ClipboardPaste } from 'lucide-react'
 import { getWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, toggleWatchlist, getWebhooks } from '../api'
 
-const SOURCES = ['facebook', 'auctionninja', 'craigslist']
+// ── Claude prompt builder ────────────────────────────────────────────── //
+function buildClaudePrompt(description) {
+  return `I'm building a deal-monitoring watchlist to find resale bargains for: "${description}"
+
+People list these items on Facebook Marketplace, Craigslist, OfferUp, eBay, and Mercari.
+
+Return ONLY a valid JSON object — no explanation, no markdown, no code fences. Just raw JSON with these exact fields:
+
+{
+  "name": "short watchlist name (2-4 words)",
+  "keywords": ["8 to 15 search terms that appear in actual resale listings — mix broad terms, brand+model combos, size/spec variants"],
+  "brands": ["top 5-10 brands worth tracking in this category"],
+  "negative_keywords": ["10-15 terms to exclude — broken, cracked, parts only, for parts, damaged, commercial grade, etc. plus category-specific junk"],
+  "min_price": <realistic minimum price for a legit used unit, as integer>,
+  "max_price": <realistic maximum price, or 99999 if highly variable, as integer>,
+  "notes": "1-2 sentences on what makes a good deal and what red flags to watch for"
+}`
+}
+
+async function openInClaude(description) {
+  const prompt = buildClaudePrompt(description)
+  if (window.platapicker?.copyToClipboard) {
+    await window.platapicker.copyToClipboard(prompt)
+  } else {
+    await navigator.clipboard.writeText(prompt)
+  }
+  const url = 'https://claude.ai/new'
+  if (window.platapicker?.openExternal) {
+    window.platapicker.openExternal(url)
+  } else {
+    window.open(url, '_blank')
+  }
+}
+
+const SOURCES = ['facebook', 'auctionninja', 'craigslist', 'offerup', 'mercari', 'ebay']
 
 const SOURCE_LABELS = {
   facebook: 'Facebook',
   auctionninja: 'AuctionNinja',
   craigslist: 'Craigslist',
+  offerup: 'OfferUp',
+  mercari: 'Mercari',
+  ebay: 'eBay',
 }
 
 const EMPTY_FORM = {
@@ -19,6 +56,124 @@ const EMPTY_FORM = {
   sources_enabled: [], run_frequency_minutes: 60,
   min_rating_to_alert: 'GOOD', min_profit_margin: 0.20, min_profit_dollars: 50,
   discord_webhook_id: null, notes: '',
+}
+
+// ── Claude AI Assistant Panel ────────────────────────────────────────── //
+function ClaudeAssistant({ onApply }) {
+  const [description, setDescription] = useState('')
+  const [pasteText, setPasteText] = useState('')
+  const [step, setStep] = useState('input') // 'input' | 'waiting' | 'paste' | 'error'
+  const [parseError, setParseError] = useState(null)
+
+  const handleGenerate = async () => {
+    if (!description.trim()) return
+    setStep('waiting')
+    try {
+      await openInClaude(description.trim())
+      setStep('paste')
+    } catch {
+      setStep('paste')
+    }
+  }
+
+  const handleImport = () => {
+    setParseError(null)
+    let text = pasteText.trim()
+    // Strip markdown code fences if Claude wrapped it
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
+    try {
+      const data = JSON.parse(text)
+      const result = {
+        name: data.name || '',
+        keywords: Array.isArray(data.keywords) ? data.keywords : [],
+        brands: Array.isArray(data.brands) ? data.brands : [],
+        negative_keywords: Array.isArray(data.negative_keywords) ? data.negative_keywords : [],
+        min_price: typeof data.min_price === 'number' ? data.min_price : 0,
+        max_price: typeof data.max_price === 'number' ? data.max_price : 99999,
+        notes: data.notes || '',
+      }
+      onApply(result)
+      setStep('input')
+      setDescription('')
+      setPasteText('')
+    } catch {
+      setParseError('Could not parse the response. Make sure you copied the full JSON from Claude.')
+    }
+  }
+
+  return (
+    <div className="claude-assistant">
+      <div className="claude-assistant-header">
+        <Sparkles size={14} style={{ color: 'var(--accent)' }} />
+        <span>Generate with Claude <span className="claude-badge">Free</span></span>
+      </div>
+
+      {step === 'input' && (
+        <div className="claude-input-row">
+          <input
+            type="text"
+            className="claude-desc-input"
+            placeholder="Describe what you're looking for… e.g. ultrawide monitor, vintage turntable"
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleGenerate()}
+          />
+          <button
+            type="button"
+            className="btn btn-accent btn-sm"
+            onClick={handleGenerate}
+            disabled={!description.trim()}
+          >
+            Open Claude →
+          </button>
+        </div>
+      )}
+
+      {step === 'waiting' && (
+        <div className="claude-step">
+          <div className="claude-step-text">
+            ✅ Prompt copied to clipboard — paste it into Claude, then copy the JSON response it gives you.
+          </div>
+          <button type="button" className="btn btn-sm btn-secondary" onClick={() => setStep('paste')}>
+            <ClipboardPaste size={13} /> I have the response
+          </button>
+        </div>
+      )}
+
+      {step === 'paste' && (
+        <div className="claude-paste-area">
+          <div className="claude-step-text" style={{ marginBottom: 8 }}>
+            ✅ Prompt copied — paste Claude's JSON response below:
+          </div>
+          {parseError && <div className="claude-error">{parseError}</div>}
+          <textarea
+            className="claude-paste-input"
+            placeholder="Paste Claude's JSON response here…"
+            value={pasteText}
+            onChange={e => setPasteText(e.target.value)}
+            rows={5}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={handleImport}
+              disabled={!pasteText.trim()}
+            >
+              Apply to Form
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => { setStep('input'); setParseError(null); setPasteText('') }}
+            >
+              Start Over
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── Chip input ───────────────────────────────────────────────────────── //
@@ -113,6 +268,19 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
+  const applyClaudeResult = (data) => {
+    setForm(f => ({
+      ...f,
+      name: data.name || f.name,
+      keywords: data.keywords?.length ? data.keywords : f.keywords,
+      brands: data.brands?.length ? data.brands : f.brands,
+      negative_keywords: data.negative_keywords?.length ? data.negative_keywords : f.negative_keywords,
+      min_price: data.min_price ?? f.min_price,
+      max_price: data.max_price ?? f.max_price,
+      notes: data.notes || f.notes,
+    }))
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!form.name.trim()) { setError('Name is required'); return }
@@ -152,6 +320,11 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
 
         <div className="drawer-body">
           {error && <div className="error-box">{error}</div>}
+
+          {!initial && (
+            <ClaudeAssistant onApply={applyClaudeResult} />
+          )}
+
           <form id="wl-form" onSubmit={handleSubmit}>
 
             {/* BASICS */}

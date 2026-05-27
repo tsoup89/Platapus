@@ -38,6 +38,12 @@ router = APIRouter()
 # Overview / Health
 # ─────────────────────────────────────────────────────────────
 
+@router.get("/health")
+@router.head("/health")
+def health():
+    return {"ok": True}
+
+
 @router.get("/overview", response_model=OverviewStats)
 def overview(db: Session = Depends(get_db)):
     sources = db.query(Source).all()
@@ -482,7 +488,7 @@ async def import_gamecube_csv(file: UploadFile = File(...), db: Session = Depend
     ]
 
     for i, row in enumerate(reader):
-        title = row.get("Game") or row.get("Title") or row.get("game") or ""
+        title = row.get("Game") or row.get("Title") or row.get("Name") or row.get("game") or ""
         title = title.strip()
         if not title:
             continue

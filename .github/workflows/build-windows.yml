@@ -1,0 +1,87 @@
+name: Build Windows
+
+on:
+  # Run manually from the GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (e.g. 1.0.1)'
+        required: false
+        default: ''
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────── #
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js ───────────────────────────────────────────────────────── #
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── Python ────────────────────────────────────────────────────────── #
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── Install root dependencies ──────────────────────────────────────── #
+      - name: Install Electron dependencies
+        run: npm ci --prefer-offline
+
+      # ── Build frontend ─────────────────────────────────────────────────── #
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npx vite build
+
+      # ── Package Windows app ────────────────────────────────────────────── #
+      - name: Build Windows installer
+        run: npx electron-builder --win --x64
+        env:
+          # Skip code signing — users will see a SmartScreen warning on first run
+          # which they can bypass by clicking "More info → Run anyway"
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # ── Bundle setup script into zip ──────────────────────────────────── #
+      - name: Create distribution zip
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          if (-not $version) { $version = "1.0.0" }
+
+          $installer = Get-ChildItem dist-electron -Recurse -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "No .exe found in dist-electron"
+            exit 1
+          }
+
+          $zipName = "Platapicker-Windows-$version.zip"
+          $zipPath = "dist-electron\$zipName"
+
+          $tmpDir = New-Item -ItemType Directory -Path "dist-electron\tmp-zip" -Force
+          Copy-Item $installer.FullName "$tmpDir\Platapicker-Setup.exe"
+          Copy-Item "setup.ps1" "$tmpDir\setup.ps1"
+
+          Compress-Archive -Path "$tmpDir\*" -DestinationPath $zipPath -Force
+          Remove-Item $tmpDir -Recurse -Force
+
+          Write-Output "Created: $zipPath"
+          Write-Output "Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MB"
+
+      # ── Upload artifact ────────────────────────────────────────────────── #
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Platapicker-Windows
+          path: dist-electron/Platapicker-Windows-*.zip
+          retention-days: 30

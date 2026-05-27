@@ -19,6 +19,9 @@ from backend.scrapers.mock_scraper import MockScraper
 from backend.scrapers.auctionninja import AuctionNinjaScraper
 from backend.scrapers.facebook import FacebookScraper
 from backend.scrapers.craigslist import CraigslistScraper
+from backend.scrapers.offerup import OfferUpScraper
+from backend.scrapers.mercari import MercariScraper
+from backend.scrapers.ebay import EbayScraper
 from backend.scoring.deal_scorer import score_listing
 from backend.scoring.gamecube_scorer import score_gamecube_listing
 from backend.services import discord as discord_service
@@ -31,6 +34,9 @@ SCRAPER_REGISTRY = {
     "auctionninja": AuctionNinjaScraper,
     "facebook": FacebookScraper,
     "craigslist": CraigslistScraper,
+    "offerup": OfferUpScraper,
+    "mercari": MercariScraper,
+    "ebay": EbayScraper,
 }
 
 
@@ -62,8 +68,8 @@ def _record_price_change(db: Session, existing: Listing, new_price: Optional[flo
 
 
 def _deduplicate(db: Session, listing: NormalizedListing, watchlist_id: int) -> Optional[Listing]:
-    """Returns existing DB listing if duplicate, else None."""
-    q = db.query(Listing)
+    """Returns existing DB listing for this watchlist if duplicate, else None."""
+    q = db.query(Listing).filter(Listing.watchlist_id == watchlist_id)
 
     if listing.source_listing_id:
         existing = q.filter(
@@ -75,7 +81,7 @@ def _deduplicate(db: Session, listing: NormalizedListing, watchlist_id: int) -> 
             _record_price_change(db, existing, listing.price)
             return existing
 
-    # Fallback: URL match
+    # Fallback: URL match within this watchlist
     if listing.url:
         existing = q.filter(Listing.url == listing.url).first()
         if existing:
