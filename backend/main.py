@@ -43,10 +43,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# allow_credentials must be False when allow_origins=["*"]
+# Phone connects from any local IP, so wildcard is required here.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:8000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

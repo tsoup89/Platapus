@@ -1,6 +1,6 @@
 """
 Orchestrates scraper runs: fetches listings, scores them, saves to DB,
-and sends Discord alerts.
+and sends Discord alerts and Expo push notifications.
 """
 import logging
 from datetime import datetime
@@ -22,6 +22,7 @@ from backend.scrapers.craigslist import CraigslistScraper
 from backend.scoring.deal_scorer import score_listing
 from backend.scoring.gamecube_scorer import score_gamecube_listing
 from backend.services import discord as discord_service
+from backend.services import push_notifications as push_service
 from backend.services.settings import get_all_settings
 
 logger = logging.getLogger("platapicker.runner")
@@ -303,7 +304,7 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
         batch_threshold = settings.get("alert_batch_threshold", 3)
 
         if len(qualifying) > batch_threshold:
-            # Send one batch alert
+            # Send one batch Discord alert
             if watchlist.discord_webhook and watchlist.discord_webhook.enabled:
                 deals = []
                 for listing, score in qualifying:
@@ -334,13 +335,27 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                         listing.alert_sent_at = datetime.utcnow()
                     alert_count = len(qualifying)
         else:
-            # Send individual alerts (existing behavior)
+            # Send individual Discord alerts
             for listing, score in qualifying:
                 ok = _send_alert(listing, score, watchlist)
                 if ok:
                     listing.alert_sent = True
                     listing.alert_sent_at = datetime.utcnow()
                     alert_count += 1
+
+        # Send Expo push notifications for every qualifying deal (alongside Discord)
+        push_token = settings.get("expo_push_token")
+        if push_token and qualifying:
+            for listing, score in qualifying:
+                push_service.send_deal_push(
+                    token=push_token,
+                    title=listing.title,
+                    price=listing.price or 0,
+                    rating=score.rating,
+                    listing_id=listing.id,
+                    source=listing.source,
+                    estimated_profit=score.estimated_profit,
+                )
 
         run.alert_count = alert_count
         run.status = "success"

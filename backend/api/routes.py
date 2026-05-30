@@ -7,6 +7,7 @@ from datetime import datetime, date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.models import get_db
@@ -695,7 +696,6 @@ def get_market_value_estimate(
     db: Session = Depends(get_db),
 ):
     if refresh:
-        # Delete cached entry so get_market_value fetches fresh data
         db.query(MarketValueCache).filter(
             MarketValueCache.keyword == keyword,
             MarketValueCache.category == category,
@@ -834,3 +834,24 @@ def update_source_config(
     src.updated_at = datetime.utcnow()
     db.commit()
     return {"ok": True, "config": src.config}
+
+
+# ─────────────────────────────────────────────────────────────
+# Mobile — Push Notifications & Connection
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/connection-test")
+def connection_test():
+    """Phone pings this on first setup to verify it can reach the backend."""
+    return {"ok": True, "service": "platapicker", "version": "1.0.0"}
+
+
+class PushTokenIn(BaseModel):
+    token: str
+
+
+@router.post("/push-token")
+def save_push_token(data: PushTokenIn, db: Session = Depends(get_db)):
+    """Store the device's Expo push token so runner.py can send deal alerts."""
+    set_setting(db, "expo_push_token", data.token)
+    return {"ok": True}
