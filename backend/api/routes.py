@@ -26,7 +26,7 @@ from backend.api.schemas import (
     OverviewStats,
 )
 from backend.services import discord as discord_service
-from backend.services.settings import get_all_settings, set_setting
+from backend.services.settings import get_all_settings, get_setting, set_setting
 from backend.scoring.title_matcher import normalize_title
 from backend.services.runner import run_scraper_for_watchlist
 from backend.services import scheduler as scheduler_service
@@ -475,7 +475,7 @@ async def import_gamecube_csv(file: UploadFile = File(...), db: Session = Depend
                 thresholds=thresholds,
                 aliases=gc_wl.aliases,
             )
-            existing_score = db.query(DealScore).filter(DealScore.listing_id == listing.id).first()
+            existing_score = db.query(DealScore).filter(DealScore.listing_id == listing.id).first()  
             if existing_score:
                 existing_score.rating = result.rating
                 existing_score.score = result.score
@@ -837,8 +837,43 @@ def update_source_config(
 
 
 # ─────────────────────────────────────────────────────────────
-# Mobile — Push Notifications & Connection
+# Mobile — Pipeline Queue, Push Notifications & Connection
+# Phone taps ⚡ → listing saved to queue → desktop polls & processes
 # ─────────────────────────────────────────────────────────────
+
+@router.post("/listings/{listing_id}/full-pipeline")
+def queue_for_pipeline(listing_id: int, db: Session = Depends(get_db)):
+    """Queue a listing for desktop pipeline (price → inventory → FB Marketplace).
+    Desktop polls GET /pipeline-queue and processes each entry."""
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+    queue: list[int] = get_setting(db, "pipeline_queue") or []
+    if listing_id not in queue:
+        queue.append(listing_id)
+        set_setting(db, "pipeline_queue", queue)
+    return {"ok": True, "queued": True, "queue_length": len(queue)}
+
+
+@router.get("/pipeline-queue")
+def get_pipeline_queue(db: Session = Depends(get_db)):
+    """Desktop polls this to pick up listings queued from the mobile app."""
+    queue: list[int] = get_setting(db, "pipeline_queue") or []
+    listings = db.query(Listing).filter(Listing.id.in_(queue)).all() if queue else []
+    return {
+        "count": len(queue),
+        "listing_ids": queue,
+        "listings": [ListingOut.from_orm_safe(l) for l in listings],
+    }
+
+
+@router.delete("/pipeline-queue/{listing_id}")
+def dequeue_pipeline(listing_id: int, db: Session = Depends(get_db)):
+    """Desktop calls this after it finishes processing a queued listing."""
+    queue: list[int] = get_setting(db, "pipeline_queue") or []
+    set_setting(db, "pipeline_queue", [i for i in queue if i != listing_id])
+    return {"ok": True}
+
 
 @router.get("/connection-test")
 def connection_test():

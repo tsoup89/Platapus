@@ -28,11 +28,20 @@ export function ListingsScreen() {
 
   function confirmPipeline(id: number) {
     Alert.alert(
-      'Full Pipeline ⚡',
-      'Move to inventory, auto-price, and list on Facebook Marketplace?',
+      'Queue for Pipeline ⚡',
+      'This adds the listing to the desktop pipeline queue. Next time Platapicker is open on your laptop it will auto-price and list on Facebook Marketplace.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Go', onPress: () => pipelineMutation.mutate(id) },
+        {
+          text: 'Queue it',
+          onPress: () =>
+            pipelineMutation.mutate(id, {
+              onSuccess: () =>
+                Alert.alert('Queued ✓', 'Will process next time desktop is open.'),
+              onError: () =>
+                Alert.alert('Error', 'Could not queue — check backend connection.'),
+            }),
+        },
       ]
     );
   }
