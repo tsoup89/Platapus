@@ -31,6 +31,9 @@ info "Data dir: $DATA_DIR"
 # PLATAPICKER_DATA_DIR pins the backend to the SAME database the Electron app
 # uses, so history/alerts/settings are shared. Setting it also makes run.py
 # disable uvicorn hot-reload (production mode). Host is 127.0.0.1 — local only.
+# For physical-phone mobile testing, run a TEMPORARY 0.0.0.0 backend instead
+# (see mobile/README or: APP_HOST=0.0.0.0 .venv/bin/python run.py); don't expose
+# the always-on service. The iOS Simulator can reach 127.0.0.1 with no exposure.
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
