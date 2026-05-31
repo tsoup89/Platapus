@@ -79,7 +79,32 @@ function findPython() {
 
 // ── Backend ──────────────────────────────────────────────────────────── //
 
-function startBackend() {
+/**
+ * Quick one-shot check for an already-running backend (e.g. the always-on
+ * launchd agent). Resolves true if one answers on the port, false otherwise.
+ */
+function probeBackend() {
+  return new Promise((resolve) => {
+    const req = http.get(`${BACKEND_URL}/api/overview`, (res) => {
+      res.resume()
+      resolve(res.statusCode < 500)
+    })
+    req.on('error', () => resolve(false))
+    req.setTimeout(800, () => { req.destroy(); resolve(false) })
+  })
+}
+
+/**
+ * Start the backend, or attach to one that's already running.
+ * Returns true if we attached (did NOT spawn), false if we spawned our own.
+ * Attaching avoids a second scheduler double-scraping the shared database.
+ */
+async function startBackend() {
+  if (await probeBackend()) {
+    console.log('[electron] Backend already running — attaching, not spawning.')
+    return true
+  }
+
   const python    = findPython()
   const resources = getResourcesPath()
   const runScript = path.join(resources, 'run.py')
@@ -131,6 +156,8 @@ function startBackend() {
       `  python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
     )
   })
+
+  return false
 }
 
 function stopBackend() {
@@ -324,7 +351,7 @@ ipcMain.handle('open-external', (_event, url) => {
 app.whenReady().then(async () => {
   if (app.dock) app.dock.setIcon(getIconPath())
   createLoadingWindow()
-  startBackend()
+  await startBackend()
 
   try {
     await waitForBackend()

@@ -52,3 +52,7 @@ data/*.csv
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Local reference data (binary spreadsheets — not version-controlled)
+Gamecube Pricing/
+*.numbers

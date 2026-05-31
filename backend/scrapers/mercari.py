@@ -89,18 +89,21 @@ class MercariScraper(BaseScraper):
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         # Mercari uses Cloudflare Bot Management which fingerprints headless mode.
-        # Run non-headless with the window pushed offscreen (invisible to user).
-        # A fresh persistent profile is needed — reuse across runs for session
-        # continuity, but re-login if Cloudflare starts blocking again.
+        # For silent background runs: start minimized so no window appears on screen.
+        # For login: headless=False with no minimization so user can interact.
+        args = [
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1280,900",
+        ]
+        if not headless:
+            # Background run — minimize to Dock, don't steal focus
+            args += ["--start-minimized", "--no-first-run", "--no-default-browser-check"]
+
         self._context = await self._playwright.chromium.launch_persistent_context(
             str(PROFILE_DIR),
             headless=False,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--window-position=10000,10000",
-                "--window-size=1280,900",
-            ],
+            args=args,
             user_agent=UA,
             viewport={"width": 1280, "height": 900},
             locale="en-US",
@@ -200,15 +203,20 @@ class MercariScraper(BaseScraper):
         print("\nOpening Mercari login page...")
         print("   Please log in, then close the browser window.")
         print("   Your session will be saved for future runs.\n")
-        # For login we show the browser normally (not offscreen)
+        # Fully visible browser for interactive login — no minimization
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         self._context = await self._playwright.chromium.launch_persistent_context(
             str(PROFILE_DIR),
             headless=False,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1280,900",
+            ],
             user_agent=UA,
             viewport={"width": 1280, "height": 900},
+            locale="en-US",
         )
         await self._context.add_init_script(STEALTH_SCRIPT)
         self._page = await self._context.new_page()
@@ -223,7 +231,7 @@ class MercariScraper(BaseScraper):
         except Exception:
             pass
         await self._close_browser()
-        print("Mercari login saved. Scraper ready.")
+        print("✅ Mercari login saved. Scraper will now run silently in the background.")
 
     def login(self):
         asyncio.run(self.interactive_login())

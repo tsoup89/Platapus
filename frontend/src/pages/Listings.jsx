@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { EyeOff, Eye, Send, ExternalLink, Info, Bot } from 'lucide-react'
-import { getListings, ignoreListing, unignoreListing, sendDiscord, getListingRaw, getWatchlists, triggerClaudeReview } from '../api'
+import { EyeOff, Eye, Send, ExternalLink, Info, Bot, Package, MessageCircle, Zap } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { getListings, ignoreListing, unignoreListing, sendDiscord, getListingRaw, getWatchlists, triggerClaudeReview, promoteListingToInventory, sendListingOutreach, runFullPipeline } from '../api'
 
 function RatingBadge({ rating }) {
   if (!rating) return <span className="text-muted">—</span>
@@ -185,7 +186,8 @@ function ScoreModal({ listing, onClose }) {
 
 export default function Listings() {
   const qc = useQueryClient()
-  const [filters, setFilters] = useState({ source: '', watchlist_id: '', ignored: false })
+  const navigate = useNavigate()
+  const [filters, setFilters] = useState({ source: '', watchlist_id: '', rating: '', ignored: false })
   const [rawModal, setRawModal] = useState(null)
   const [scoreModal, setScoreModal] = useState(null)
   const [claudeModal, setClaudeModal] = useState(null)
@@ -196,6 +198,7 @@ export default function Listings() {
     queryFn: () => getListings({
       source: filters.source || undefined,
       watchlist_id: filters.watchlist_id || undefined,
+      rating: filters.rating || undefined,
       ignored: filters.ignored,
       limit: 100,
     }),
@@ -223,6 +226,33 @@ export default function Listings() {
     onSuccess: (_, id) => {
       setMsg('🤖 Claude review queued — refresh in a moment.')
       setTimeout(() => qc.invalidateQueries(['listings']), 3000)
+    },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
+  const promoteMut = useMutation({
+    mutationFn: promoteListingToInventory,
+    onSuccess: (item) => {
+      setMsg(`✅ Added "${item.title}" to inventory. Opening sell-side…`)
+      setTimeout(() => navigate('/inventory'), 800)
+    },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
+  const outreachMut = useMutation({
+    mutationFn: sendListingOutreach,
+    onSuccess: () => {
+      setMsg('✉ Message queued — will send in background.')
+      setTimeout(() => qc.invalidateQueries(['listings']), 3000)
+    },
+    onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
+  })
+
+  const pipelineMut = useMutation({
+    mutationFn: runFullPipeline,
+    onSuccess: (data) => {
+      setMsg(`⚡ Pipeline started — pricing + listing running in background.`)
+      setTimeout(() => navigate('/inventory'), 1200)
     },
     onError: (e) => setMsg(`❌ ${e?.response?.data?.detail || e.message}`),
   })
@@ -257,6 +287,17 @@ export default function Listings() {
             </select>
           </div>
           <div>
+            <label>Rating</label>
+            <select value={filters.rating} onChange={e => setFilters(f => ({ ...f, rating: e.target.value }))}>
+              <option value="">All</option>
+              <option value="STEAL">STEAL</option>
+              <option value="GREAT">GREAT</option>
+              <option value="GOOD">GOOD</option>
+              <option value="FAIR">FAIR</option>
+              <option value="PASS">PASS</option>
+            </select>
+          </div>
+          <div>
             <label>Show Ignored</label>
             <select value={String(filters.ignored)} onChange={e => setFilters(f => ({ ...f, ignored: e.target.value === 'true' }))}>
               <option value="false">Hide Ignored</option>
@@ -283,6 +324,7 @@ export default function Listings() {
                 <th>Cons. Value</th>
                 <th>Target Buy</th>
                 <th>Claude</th>
+                <th>Outreach</th>
                 <th>Location</th>
                 <th>First Seen</th>
                 <th>Alert</th>
@@ -316,6 +358,20 @@ export default function Listings() {
                       onTrigger={(id) => claudeMut.mutate(id)}
                     />
                   </td>
+                  <td>
+                    {l.outreach_status === 'SENT' && (
+                      <span className="badge badge-green" title={`Sent${l.outreach_sent_at ? ` ${fmtDate(l.outreach_sent_at)}` : ''}`}>✉ Sent</span>
+                    )}
+                    {l.outreach_status === 'QUEUED' && (
+                      <span className="badge badge-blue">⏳ Queued</span>
+                    )}
+                    {l.outreach_status === 'FAILED' && (
+                      <span className="badge badge-red">✗ Failed</span>
+                    )}
+                    {!l.outreach_status && (
+                      <span className="text-muted" style={{ fontSize: 11 }}>—</span>
+                    )}
+                  </td>
                   <td className="text-muted" style={{ fontSize: 12 }}>{l.location || '—'}</td>
                   <td className="text-muted" style={{ fontSize: 12 }}>{fmtDate(l.first_seen_at)}</td>
                   <td>
@@ -337,13 +393,44 @@ export default function Listings() {
                       <button className="btn btn-sm btn-secondary" title="View raw" onClick={() => setRawModal(l.id)}>
                         {'{ }'}
                       </button>
+                      {/* Only show outreach button for FB listings not yet messaged */}
+                      {l.source === 'facebook' && l.outreach_status !== 'SENT' && (
+                        <button
+                          className="btn btn-sm btn-secondary"
+                          title="Message seller on Facebook"
+                          onClick={() => outreachMut.mutate(l.id)}
+                          disabled={outreachMut.isPending || l.outreach_status === 'QUEUED'}
+                          style={{ color: '#60a5fa', borderColor: 'rgba(96,165,250,0.4)' }}
+                        >
+                          <MessageCircle size={12} />
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        title="Mark as purchased → add to sell-side inventory"
+                        onClick={() => promoteMut.mutate(l.id)}
+                        disabled={promoteMut.isPending}
+                        style={{ color: 'var(--green)', borderColor: 'rgba(34,197,94,0.4)' }}
+                      >
+                        <Package size={12} />
+                      </button>
+                      {/* Full pipeline: promote + auto-price + auto-list */}
+                      <button
+                        className="btn btn-sm btn-secondary"
+                        title="Full pipeline: add to inventory → auto-price → auto-list on Facebook"
+                        onClick={() => pipelineMut.mutate(l.id)}
+                        disabled={pipelineMut.isPending}
+                        style={{ color: '#f59e0b', borderColor: 'rgba(245,158,11,0.4)' }}
+                      >
+                        <Zap size={12} />
+                      </button>
                     </div>
                   </td>
                 </tr>
               ))}
               {!listings?.length && (
                 <tr>
-                  <td colSpan={12}>
+                  <td colSpan={13}>
                     <div className="empty-state">
                       <div className="icon">🔍</div>
                       <div>No listings yet. Run a scraper to start finding deals.</div>

@@ -50,7 +50,7 @@ export default function Overview() {
     <div>
       <div className="page-header">
         <div>
-          <div className="page-title">🦆 Platapicker</div>
+          <div className="page-title"><img src="/icon.png" alt="" style={{height:'28px',verticalAlign:'middle',marginRight:'8px'}} />Platapicker</div>
           <div className="page-subtitle">Deal monitoring control center</div>
         </div>
         <div className="actions-row">
@@ -147,7 +147,7 @@ export default function Overview() {
             )}
           </span>
         )}
-        <span style={{ marginLeft: 'auto', color: 'var(--border)' }}>🦆 logo placeholder</span>
+        <span style={{ marginLeft: 'auto' }}><img src="/icon.png" alt="" style={{height:'32px',opacity:0.15}} /></span>
       </div>
     </div>
   )

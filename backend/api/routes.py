@@ -7,6 +7,7 @@ from datetime import datetime, date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from backend.models import get_db
@@ -14,8 +15,12 @@ from backend.models.models import (
     Watchlist, Source, ScraperRun, Listing, DealScore,
     DiscordWebhook, GameCubePrice, TitleMapping, AppSetting,
     MarketValueCache, ClaudeReview,
+    InventoryItem, InventoryPhoto, SellListing,
 )
 from backend.services.market_value import get_market_value
+from backend.services.paths import (
+    get_inventory_photos_dir, get_inventory_item_photos_dir,
+)
 from backend.api.schemas import (
     WatchlistCreate, WatchlistUpdate, WatchlistOut,
     DiscordWebhookCreate, DiscordWebhookOut,
@@ -23,6 +28,8 @@ from backend.api.schemas import (
     ListingOut, DealScoreOut, ClaudeReviewOut,
     GameCubePriceOut, GameCubePriceUpdate, TitleMappingOut,
     OverviewStats,
+    InventoryItemCreate, InventoryItemUpdate, InventoryItemOut,
+    SellListingOut, CreateSellListingIn, MarkSoldIn, UpdateSellListingIn,
 )
 from backend.services import discord as discord_service
 from backend.services.settings import get_all_settings, set_setting
@@ -95,6 +102,9 @@ def create_watchlist(data: WatchlistCreate, db: Session = Depends(get_db)):
         min_profit_dollars=data.min_profit_dollars,
         discord_webhook_id=data.discord_webhook_id,
         notes=data.notes,
+        auto_outreach_enabled=data.auto_outreach_enabled,
+        outreach_message_template=data.outreach_message_template,
+        auto_list_on_buy=data.auto_list_on_buy,
     )
     wl.keywords = data.keywords
     wl.negative_keywords = data.negative_keywords
@@ -123,7 +133,8 @@ def update_watchlist(watchlist_id: int, data: WatchlistUpdate, db: Session = Dep
         raise HTTPException(404, "Watchlist not found")
     for field in ["name", "enabled", "category", "radius_miles", "min_price",
                   "max_price", "run_frequency_minutes", "min_rating_to_alert",
-                  "min_profit_margin", "min_profit_dollars", "discord_webhook_id", "notes"]:
+                  "min_profit_margin", "min_profit_dollars", "discord_webhook_id", "notes",
+                  "auto_outreach_enabled", "outreach_message_template", "auto_list_on_buy"]:
         setattr(wl, field, getattr(data, field))
     wl.keywords = data.keywords
     wl.negative_keywords = data.negative_keywords
@@ -210,6 +221,23 @@ def run_all_scrapers(background_tasks: BackgroundTasks, db: Session = Depends(ge
     return {"message": "All scrapers queued."}
 
 
+@router.post("/sources/{source_name}/login")
+def trigger_login(source_name: str, background_tasks: BackgroundTasks):
+    """Open a browser window for the user to log into a browser-based scraper."""
+    def _do_login():
+        if source_name == "mercari":
+            from backend.scrapers.mercari import MercariScraper
+            MercariScraper().login()
+        elif source_name == "facebook":
+            from backend.scrapers.facebook import FacebookScraper
+            FacebookScraper().login()
+        else:
+            raise ValueError(f"No login flow for: {source_name}")
+
+    background_tasks.add_task(_do_login)
+    return {"message": f"Opening {source_name} login window…"}
+
+
 # ─────────────────────────────────────────────────────────────
 # Scraper Runs
 # ─────────────────────────────────────────────────────────────
@@ -245,6 +273,8 @@ def list_listings(
         q = q.filter(Listing.source == source)
     if ignored is not None:
         q = q.filter(Listing.ignored == ignored)
+    if rating:
+        q = q.join(DealScore).filter(DealScore.rating == rating)
     listings = q.order_by(Listing.first_seen_at.desc()).offset(offset).limit(limit).all()
     return [ListingOut.from_orm_safe(l) for l in listings]
 
@@ -390,6 +420,44 @@ def trigger_claude_review(
 
     background_tasks.add_task(_do_review)
     return {"message": "Claude review queued.", "listing_id": listing_id}
+
+
+@router.post("/analyze-photo")
+async def analyze_photo_endpoint(
+    mode: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Analyze an uploaded photo with Claude to pre-fill inventory or watchlist form fields."""
+    if mode not in ("inventory", "watchlist"):
+        raise HTTPException(400, "mode must be 'inventory' or 'watchlist'")
+
+    settings = get_all_settings(db)
+    api_key = settings.get("claude_api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Claude API key not configured. Add it in Settings → Claude Review.")
+
+    content_type = file.content_type or "image/jpeg"
+    if not content_type.startswith("image/"):
+        raise HTTPException(400, "File must be an image.")
+
+    image_bytes = await file.read()
+    if len(image_bytes) > 15 * 1024 * 1024:
+        raise HTTPException(400, "Image too large (max 15 MB).")
+
+    try:
+        from backend.services.claude_analyzer import analyze_photo
+        result = analyze_photo(
+            image_bytes=image_bytes,
+            media_type=content_type,
+            mode=mode,
+            api_key=api_key,
+            model=settings.get("claude_model", "claude-haiku-4-5"),
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Photo analysis failed: {e}")
+        raise HTTPException(500, f"Claude analysis failed: {str(e)}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -678,6 +746,13 @@ def get_settings(db: Session = Depends(get_db)):
 def update_settings(data: dict, db: Session = Depends(get_db)):
     for key, value in data.items():
         set_setting(db, key, value)
+
+    # Reconcile the running scheduler with the new settings so toggling
+    # global_schedule_enabled (or changing the interval) takes effect
+    # immediately, without an app restart.
+    if "global_schedule_enabled" in data or "global_schedule_interval_minutes" in data:
+        scheduler_service.apply_settings()
+
     return {"ok": True}
 
 
@@ -903,6 +978,985 @@ def facebook_debug_scrape(
         return {"message": f"Debug scrape for '{keyword}' queued — check logs."}
     return {"message": "No background task context available."}
 
+
+# ─────────────────────────────────────────────────────────────
+# Inventory (sell-side)
+# ─────────────────────────────────────────────────────────────
+
+ALLOWED_PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MAX_PHOTO_BYTES = 15 * 1024 * 1024  # 15MB per photo
+
+
+@router.get("/inventory", response_model=list[InventoryItemOut])
+def list_inventory(
+    status: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    q = db.query(InventoryItem)
+    if status:
+        q = q.filter(InventoryItem.status == status)
+    items = q.order_by(InventoryItem.created_at.desc()).offset(offset).limit(limit).all()
+    return [InventoryItemOut.from_orm_safe(i) for i in items]
+
+
+@router.post("/inventory", response_model=InventoryItemOut)
+def create_inventory_item(data: InventoryItemCreate, db: Session = Depends(get_db)):
+    item = InventoryItem(
+        title=data.title,
+        description=data.description,
+        category=data.category,
+        condition=data.condition,
+        purchase_price=data.purchase_price,
+        purchase_date=data.purchase_date,
+        source_listing_id=data.source_listing_id,
+        notes=data.notes,
+        status=data.status,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return InventoryItemOut.from_orm_safe(item)
+
+
+@router.get("/inventory/{item_id}", response_model=InventoryItemOut)
+def get_inventory_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    return InventoryItemOut.from_orm_safe(item)
+
+
+@router.patch("/inventory/{item_id}", response_model=InventoryItemOut)
+def update_inventory_item(
+    item_id: int, data: InventoryItemUpdate, db: Session = Depends(get_db)
+):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(item, field, value)
+    item.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return InventoryItemOut.from_orm_safe(item)
+
+
+@router.delete("/inventory/{item_id}")
+def delete_inventory_item(item_id: int, db: Session = Depends(get_db)):
+    import shutil
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    # Remove photo files on disk
+    photos_dir = get_inventory_photos_dir() / str(item_id)
+    if photos_dir.exists():
+        shutil.rmtree(photos_dir, ignore_errors=True)
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/inventory/{item_id}/photos", response_model=InventoryItemOut)
+async def upload_inventory_photos(
+    item_id: int,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    import uuid as _uuid
+    from pathlib import Path as _Path
+
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+
+    photos_dir = get_inventory_item_photos_dir(item_id)
+    existing_count = db.query(InventoryPhoto).filter(
+        InventoryPhoto.inventory_item_id == item_id
+    ).count()
+
+    for idx, upload in enumerate(files):
+        ext = _Path(upload.filename or "").suffix.lower() or ".jpg"
+        if ext not in ALLOWED_PHOTO_EXT:
+            raise HTTPException(400, f"Unsupported image type: {ext}")
+        contents = await upload.read()
+        if len(contents) > MAX_PHOTO_BYTES:
+            raise HTTPException(400, f"Photo too large (max 15MB): {upload.filename}")
+        filename = f"{_uuid.uuid4().hex}{ext}"
+        (photos_dir / filename).write_bytes(contents)
+        photo = InventoryPhoto(
+            inventory_item_id=item_id,
+            file_path=filename,
+            order_index=existing_count + idx,
+        )
+        db.add(photo)
+
+    item.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return InventoryItemOut.from_orm_safe(item)
+
+
+@router.delete("/inventory/photos/{photo_id}")
+def delete_inventory_photo(photo_id: int, db: Session = Depends(get_db)):
+    photo = db.query(InventoryPhoto).filter(InventoryPhoto.id == photo_id).first()
+    if not photo:
+        raise HTTPException(404, "Photo not found")
+    photo_path = get_inventory_photos_dir() / str(photo.inventory_item_id) / photo.file_path
+    if photo_path.exists():
+        try:
+            photo_path.unlink()
+        except OSError:
+            pass
+    db.delete(photo)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/inventory/photos/reorder")
+def reorder_inventory_photos(data: dict, db: Session = Depends(get_db)):
+    """Body: {photo_ids: [int, int, ...]} — sets order_index by position."""
+    ids = data.get("photo_ids", [])
+    if not isinstance(ids, list):
+        raise HTTPException(400, "photo_ids must be a list")
+    for idx, pid in enumerate(ids):
+        photo = db.query(InventoryPhoto).filter(InventoryPhoto.id == pid).first()
+        if photo:
+            photo.order_index = idx
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/inventory/photos/{item_id}/{filename}")
+def serve_inventory_photo(item_id: int, filename: str):
+    # Path-traversal guard
+    if "/" in filename or ".." in filename or "\\" in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = get_inventory_photos_dir() / str(item_id) / filename
+    if not path.exists():
+        raise HTTPException(404, "Photo not found")
+    return FileResponse(str(path))
+
+
+# ─────────────────────────────────────────────────────────────
+# Inventory — price suggestions
+# ─────────────────────────────────────────────────────────────
+
+@router.post("/inventory/{item_id}/price-suggestion")
+def trigger_price_suggestion(
+    item_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Kick off an async price-suggestion job. Poll GET .../price-suggestion for results."""
+    from backend.api.schemas import PriceSuggestionOut
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+
+    def _run_suggestion(iid: int, title: str, condition: str):
+        from backend.models.database import SessionLocal
+        from backend.services.auto_pricing import suggest_price
+        bdb = SessionLocal()
+        try:
+            suggestion = suggest_price(title, condition, db=bdb)
+            row = bdb.query(InventoryItem).filter(InventoryItem.id == iid).first()
+            if row:
+                row.price_suggestion = suggestion.to_dict()
+                bdb.commit()
+                logger.info(f"Price suggestion saved for item {iid}: ${suggestion.suggested_price}")
+        except Exception as e:
+            logger.error(f"Price suggestion failed for item {iid}: {e}", exc_info=True)
+        finally:
+            bdb.close()
+
+    # Mark as pending right away so the frontend knows work is in progress
+    pending = {
+        "suggested_price": None,
+        "low_estimate": None,
+        "high_estimate": None,
+        "confidence": "pending",
+        "condition_applied": item.condition or "GOOD",
+        "keyword_used": item.title,
+        "generated_at": None,
+        "error": None,
+        "comps": [],
+    }
+    item.price_suggestion = pending
+    db.commit()
+
+    background_tasks.add_task(_run_suggestion, item_id, item.title, item.condition or "GOOD")
+    return {"status": "started", "item_id": item_id}
+
+
+@router.get("/inventory/{item_id}/price-suggestion")
+def get_price_suggestion(item_id: int, db: Session = Depends(get_db)):
+    """Return the cached price suggestion for an inventory item."""
+    from backend.api.schemas import PriceSuggestionOut
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    if not item.price_suggestion:
+        return {"confidence": "none", "comps": [], "suggested_price": None,
+                "low_estimate": None, "high_estimate": None,
+                "condition_applied": item.condition or "GOOD",
+                "keyword_used": item.title, "generated_at": None, "error": None}
+    return item.price_suggestion
+
+
+# ─────────────────────────────────────────────────────────────
+# Sell listings — list items on eBay / Facebook
+# ─────────────────────────────────────────────────────────────
+
+PLATFORM_FEE_RATES = {
+    "ebay": 0.1325,       # 13.25% FVF
+    "facebook": 0.05,     # 5% for shipping (0% local pickup)
+}
+
+
+def _sell_listing_to_out(sl: SellListing) -> SellListingOut:
+    return SellListingOut(
+        id=sl.id,
+        inventory_item_id=sl.inventory_item_id,
+        platform=sl.platform,
+        platform_listing_id=sl.platform_listing_id,
+        platform_url=sl.platform_url,
+        action_url=sl.action_url,
+        listed_price=sl.listed_price,
+        status=sl.status,
+        listed_at=sl.listed_at,
+        sold_at=sl.sold_at,
+        removed_at=sl.removed_at,
+        sale_price=sl.sale_price,
+        platform_fees=sl.platform_fees,
+        shipping_cost=sl.shipping_cost,
+        error_message=sl.error_message,
+        screenshot_path=sl.screenshot_path,
+        created_at=sl.created_at,
+        updated_at=sl.updated_at,
+    )
+
+
+@router.get("/inventory/{item_id}/sell-listings", response_model=list[SellListingOut])
+def list_sell_listings_for_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    return [_sell_listing_to_out(sl) for sl in item.sell_listings]
+
+
+@router.post("/inventory/{item_id}/sell-listings", response_model=SellListingOut)
+def create_sell_listing(
+    item_id: int,
+    data: CreateSellListingIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Initiate listing an inventory item on a platform.
+
+    For eBay (manual flow): creates the record immediately with status DRAFT
+    and returns an action_url the user opens in their browser.
+
+    For Facebook (Playwright): creates the record as POSTING, then kicks off
+    Playwright in the background. Poll GET .../sell-listings to see result.
+    """
+    platform = data.platform.lower()
+    if platform not in ("ebay", "facebook"):
+        raise HTTPException(400, "Platform must be 'ebay' or 'facebook'")
+
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+
+    # Build initial record
+    sl = SellListing(
+        inventory_item_id=item_id,
+        platform=platform,
+        listed_price=data.listed_price,
+        status="DRAFT" if platform == "ebay" else "POSTING",
+        listed_at=datetime.utcnow() if platform == "facebook" else None,
+    )
+    db.add(sl)
+    db.commit()
+    db.refresh(sl)
+    sl_id = sl.id
+
+    if platform == "ebay":
+        # eBay manual-fallback: generate action_url immediately
+        from backend.services.sellers.ebay import EbaySeller
+        from backend.services.sellers.base import ListingDraft
+        draft = ListingDraft(
+            title=item.title,
+            description=item.description or "",
+            price=data.listed_price,
+            condition=item.condition or "GOOD",
+            category=item.category,
+            photo_paths=[],
+        )
+        result = EbaySeller().create_listing(draft)
+        sl.action_url = result.action_url
+        sl.status = "DRAFT"
+        sl.raw_metadata = result.extra
+        db.commit()
+        db.refresh(sl)
+        return _sell_listing_to_out(sl)
+
+    # Facebook: run Playwright in background
+    def _run_fb(iid: int, sell_listing_id: int, price: float):
+        from backend.models.database import SessionLocal
+        from backend.services.sellers.facebook import FacebookSeller
+        from backend.services.sellers.base import ListingDraft
+        from backend.services.paths import get_inventory_item_photos_dir
+        bdb = SessionLocal()
+        try:
+            inv_item = bdb.query(InventoryItem).filter(InventoryItem.id == iid).first()
+            if not inv_item:
+                return
+
+            # Collect photo paths
+            photo_paths = []
+            if inv_item.photos:
+                photos_dir = get_inventory_item_photos_dir(iid)
+                for p in inv_item.photos:
+                    full = photos_dir.parent / str(iid) / p.file_path
+                    if full.exists():
+                        photo_paths.append(full)
+
+            draft = ListingDraft(
+                title=inv_item.title,
+                description=inv_item.description or "",
+                price=price,
+                condition=inv_item.condition or "GOOD",
+                category=inv_item.category,
+                photo_paths=photo_paths,
+            )
+
+            result = FacebookSeller().create_listing(draft)
+
+            row = bdb.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+            if not row:
+                return
+
+            if result.success:
+                row.status = "POSTED"
+                row.platform_url = result.platform_url
+                row.listed_at = datetime.utcnow()
+                # Update InventoryItem status to LISTED if not already sold
+                if inv_item.status == "DRAFT":
+                    inv_item.status = "LISTED"
+            else:
+                row.status = "FAILED"
+                row.error_message = result.error_message
+                row.action_url = result.action_url or "https://www.facebook.com/marketplace/create/item"
+                row.screenshot_path = result.screenshot_path
+
+            bdb.commit()
+            logger.info(
+                f"FB listing background task done for item {iid}: "
+                f"success={result.success}"
+            )
+        except Exception as e:
+            logger.error(f"FB listing background task failed: {e}", exc_info=True)
+            try:
+                row = bdb.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+                if row:
+                    row.status = "FAILED"
+                    row.error_message = str(e)
+                    row.action_url = "https://www.facebook.com/marketplace/create/item"
+                    bdb.commit()
+            except Exception:
+                pass
+        finally:
+            bdb.close()
+
+    background_tasks.add_task(_run_fb, item_id, sl_id, data.listed_price)
+    return _sell_listing_to_out(sl)
+
+
+@router.get("/sell-listings/{sell_listing_id}", response_model=SellListingOut)
+def get_sell_listing(sell_listing_id: int, db: Session = Depends(get_db)):
+    sl = db.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+    if not sl:
+        raise HTTPException(404, "Sell listing not found")
+    return _sell_listing_to_out(sl)
+
+
+@router.patch("/sell-listings/{sell_listing_id}", response_model=SellListingOut)
+def update_sell_listing(
+    sell_listing_id: int,
+    data: UpdateSellListingIn,
+    db: Session = Depends(get_db),
+):
+    """Update platform URL / listing ID after manual listing completion."""
+    sl = db.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+    if not sl:
+        raise HTTPException(404, "Sell listing not found")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(sl, field, value)
+    if data.status == "POSTED" and not sl.listed_at:
+        sl.listed_at = datetime.utcnow()
+    sl.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sl)
+    return _sell_listing_to_out(sl)
+
+
+@router.post("/sell-listings/{sell_listing_id}/mark-sold", response_model=SellListingOut)
+def mark_sell_listing_sold(
+    sell_listing_id: int,
+    data: MarkSoldIn,
+    db: Session = Depends(get_db),
+):
+    sl = db.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+    if not sl:
+        raise HTTPException(404, "Sell listing not found")
+
+    # Auto-calculate fees if not provided
+    fees = data.platform_fees
+    if fees is None:
+        rate = PLATFORM_FEE_RATES.get(sl.platform, 0)
+        fees = round(data.sale_price * rate, 2)
+
+    sl.status = "SOLD"
+    sl.sale_price = data.sale_price
+    sl.platform_fees = fees
+    sl.shipping_cost = data.shipping_cost or 0.0
+    sl.sold_at = datetime.utcnow()
+    if data.platform_listing_id:
+        sl.platform_listing_id = data.platform_listing_id
+    if data.platform_url:
+        sl.platform_url = data.platform_url
+
+    # Update inventory item status
+    item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+    if item:
+        item.status = "SOLD"
+        item.updated_at = datetime.utcnow()
+
+    sl.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sl)
+    return _sell_listing_to_out(sl)
+
+
+@router.post("/sell-listings/{sell_listing_id}/remove", response_model=SellListingOut)
+def remove_sell_listing(sell_listing_id: int, db: Session = Depends(get_db)):
+    sl = db.query(SellListing).filter(SellListing.id == sell_listing_id).first()
+    if not sl:
+        raise HTTPException(404, "Sell listing not found")
+    sl.status = "REMOVED"
+    sl.removed_at = datetime.utcnow()
+    sl.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sl)
+    return _sell_listing_to_out(sl)
+
+
+@router.post("/listings/{listing_id}/promote-to-inventory", response_model=InventoryItemOut)
+def promote_listing_to_inventory(
+    listing_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Create an InventoryItem from a buy-side Listing.
+
+    Copies title/price/source link. If the listing has an image_url, downloads it
+    in the background as the first photo. The user is expected to add their own
+    photos (of the item they actually received) afterward.
+    """
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+
+    existing = db.query(InventoryItem).filter(
+        InventoryItem.source_listing_id == listing_id
+    ).first()
+    if existing:
+        return InventoryItemOut.from_orm_safe(existing)
+
+    item = InventoryItem(
+        title=listing.title,
+        description=listing.description or "",
+        category=listing.watchlist.category if listing.watchlist else None,
+        condition="GOOD",
+        purchase_price=listing.price,
+        purchase_date=datetime.utcnow(),
+        source_listing_id=listing_id,
+        notes=f"Promoted from {listing.source} listing.",
+        status="DRAFT",
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
+    image_url = listing.image_url
+    if image_url:
+        new_item_id = item.id
+
+        def _download_image():
+            import httpx
+            import uuid as _uuid
+            from pathlib import Path as _Path
+            from backend.models.database import SessionLocal
+
+            try:
+                resp = httpx.get(image_url, timeout=15.0, follow_redirects=True)
+                if resp.status_code != 200 or len(resp.content) > MAX_PHOTO_BYTES:
+                    return
+                ext = _Path(image_url.split("?")[0]).suffix.lower()
+                if ext not in ALLOWED_PHOTO_EXT:
+                    ext = ".jpg"
+                filename = f"{_uuid.uuid4().hex}{ext}"
+                photo_dir = get_inventory_item_photos_dir(new_item_id)
+                (photo_dir / filename).write_bytes(resp.content)
+
+                bdb = SessionLocal()
+                try:
+                    photo = InventoryPhoto(
+                        inventory_item_id=new_item_id,
+                        file_path=filename,
+                        order_index=0,
+                    )
+                    bdb.add(photo)
+                    bdb.commit()
+                finally:
+                    bdb.close()
+            except Exception as e:
+                logger.warning(f"Failed to download promoted listing image: {e}")
+
+        background_tasks.add_task(_download_image)
+
+    return InventoryItemOut.from_orm_safe(item)
+
+
+# ─────────────────────────────────────────────────────────────
+# Sell dashboard + profit analytics
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/sell/dashboard")
+def get_sell_dashboard(db: Session = Depends(get_db)):
+    """
+    KPI summary for the Sell Dashboard page.
+    Returns counts, values, profit, and items needing attention.
+    """
+    from datetime import date, timedelta
+    now = datetime.utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    stale_threshold = now - timedelta(days=30)
+
+    # Active sell listings (DRAFT or POSTED)
+    active = db.query(SellListing).filter(
+        SellListing.status.in_(["DRAFT", "POSTED"])
+    ).all()
+
+    # Total listed value
+    total_listed_value = sum(
+        (sl.listed_price or 0) for sl in active
+    )
+
+    # Sold this month
+    sold_this_month = db.query(SellListing).filter(
+        SellListing.status == "SOLD",
+        SellListing.sold_at >= month_start,
+    ).all()
+
+    revenue_this_month = sum(sl.sale_price or 0 for sl in sold_this_month)
+    fees_this_month = sum(sl.platform_fees or 0 for sl in sold_this_month)
+    shipping_this_month = sum(sl.shipping_cost or 0 for sl in sold_this_month)
+
+    # Purchase costs for sold items this month
+    sold_item_ids = [sl.inventory_item_id for sl in sold_this_month]
+    purchase_costs = 0.0
+    if sold_item_ids:
+        inv_items = db.query(InventoryItem).filter(
+            InventoryItem.id.in_(sold_item_ids)
+        ).all()
+        purchase_costs = sum(i.purchase_price or 0 for i in inv_items)
+
+    profit_this_month = round(
+        revenue_this_month - fees_this_month - shipping_this_month - purchase_costs, 2
+    )
+
+    # All-time totals
+    all_sold = db.query(SellListing).filter(SellListing.status == "SOLD").all()
+    all_revenue = sum(sl.sale_price or 0 for sl in all_sold)
+    all_fees = sum(sl.platform_fees or 0 for sl in all_sold)
+    all_shipping = sum(sl.shipping_cost or 0 for sl in all_sold)
+    all_item_ids = [sl.inventory_item_id for sl in all_sold]
+    all_purchase = 0.0
+    if all_item_ids:
+        inv = db.query(InventoryItem).filter(InventoryItem.id.in_(all_item_ids)).all()
+        all_purchase = sum(i.purchase_price or 0 for i in inv)
+    total_profit = round(all_revenue - all_fees - all_shipping - all_purchase, 2)
+
+    # Inventory status counts
+    inv_counts = {}
+    for status in ("DRAFT", "LISTED", "SOLD", "ARCHIVED"):
+        inv_counts[status.lower()] = db.query(InventoryItem).filter(
+            InventoryItem.status == status
+        ).count()
+
+    # Needs attention
+    attention = []
+
+    # Failed listings
+    failed = db.query(SellListing).filter(SellListing.status == "FAILED").all()
+    for sl in failed:
+        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        attention.append({
+            "type": "failed_listing",
+            "inventory_item_id": sl.inventory_item_id,
+            "sell_listing_id": sl.id,
+            "title": inv_item.title if inv_item else "Unknown",
+            "platform": sl.platform,
+            "message": f"{sl.platform.title()} listing failed — {(sl.error_message or '')[:80]}",
+        })
+
+    # Stale listings (POSTED but no sale for >30 days)
+    stale = db.query(SellListing).filter(
+        SellListing.status == "POSTED",
+        SellListing.listed_at <= stale_threshold,
+    ).all()
+    for sl in stale:
+        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        days = (now - sl.listed_at).days if sl.listed_at else "?"
+        attention.append({
+            "type": "stale_listing",
+            "inventory_item_id": sl.inventory_item_id,
+            "sell_listing_id": sl.id,
+            "title": inv_item.title if inv_item else "Unknown",
+            "platform": sl.platform,
+            "message": f"Listed on {sl.platform.title()} for {days} days — consider a price drop",
+        })
+
+    # Recent activity (last 20 status changes)
+    recent_listings = db.query(SellListing).order_by(
+        SellListing.updated_at.desc()
+    ).limit(20).all()
+    activity = []
+    for sl in recent_listings:
+        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        activity.append({
+            "sell_listing_id": sl.id,
+            "inventory_item_id": sl.inventory_item_id,
+            "title": inv_item.title if inv_item else "Unknown",
+            "platform": sl.platform,
+            "status": sl.status,
+            "listed_price": sl.listed_price,
+            "sale_price": sl.sale_price,
+            "updated_at": sl.updated_at.isoformat() if sl.updated_at else None,
+        })
+
+    return {
+        "active_listings_count": len(active),
+        "total_listed_value": round(total_listed_value, 2),
+        "sold_this_month_count": len(sold_this_month),
+        "revenue_this_month": round(revenue_this_month, 2),
+        "profit_this_month": profit_this_month,
+        "total_profit_alltime": total_profit,
+        "total_sold_alltime": len(all_sold),
+        "inventory": inv_counts,
+        "attention": attention,
+        "activity": activity,
+    }
+
+
+@router.get("/sell/profit")
+def get_sell_profit(
+    platform: Optional[str] = None,
+    days: Optional[int] = None,   # e.g. 30, 90, 365 — None = all time
+    db: Session = Depends(get_db),
+):
+    """
+    Detailed profit breakdown for the Profit Tracker page.
+    """
+    query = db.query(SellListing).filter(SellListing.status == "SOLD")
+
+    if platform:
+        query = query.filter(SellListing.platform == platform.lower())
+
+    if days:
+        cutoff = datetime.utcnow() - __import__("datetime").timedelta(days=days)
+        query = query.filter(SellListing.sold_at >= cutoff)
+
+    sold = query.order_by(SellListing.sold_at.desc()).all()
+
+    rows = []
+    for sl in sold:
+        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        purchase_price = inv_item.purchase_price if inv_item else None
+        sale_price = sl.sale_price or 0
+        fees = sl.platform_fees or 0
+        shipping = sl.shipping_cost or 0
+        cost = purchase_price or 0
+        net = round(sale_price - fees - shipping - cost, 2)
+        roi = round((net / cost * 100), 1) if cost > 0 else None
+
+        rows.append({
+            "sell_listing_id": sl.id,
+            "inventory_item_id": sl.inventory_item_id,
+            "title": inv_item.title if inv_item else "Unknown",
+            "category": inv_item.category if inv_item else None,
+            "condition": inv_item.condition if inv_item else None,
+            "platform": sl.platform,
+            "platform_url": sl.platform_url,
+            "purchase_price": purchase_price,
+            "listed_price": sl.listed_price,
+            "sale_price": sale_price,
+            "platform_fees": fees,
+            "shipping_cost": shipping,
+            "net_profit": net,
+            "roi_pct": roi,
+            "sold_at": sl.sold_at.isoformat() if sl.sold_at else None,
+            "source_listing_id": inv_item.source_listing_id if inv_item else None,
+        })
+
+    # Aggregates
+    total_revenue = sum(r["sale_price"] for r in rows)
+    total_fees = sum(r["platform_fees"] for r in rows)
+    total_shipping = sum(r["shipping_cost"] for r in rows)
+    total_cost = sum(r["purchase_price"] or 0 for r in rows)
+    total_net = round(total_revenue - total_fees - total_shipping - total_cost, 2)
+
+    # By platform
+    by_platform = {}
+    for r in rows:
+        p = r["platform"]
+        if p not in by_platform:
+            by_platform[p] = {"count": 0, "revenue": 0, "fees": 0, "net": 0}
+        by_platform[p]["count"] += 1
+        by_platform[p]["revenue"] = round(by_platform[p]["revenue"] + r["sale_price"], 2)
+        by_platform[p]["fees"] = round(by_platform[p]["fees"] + r["platform_fees"], 2)
+        by_platform[p]["net"] = round(by_platform[p]["net"] + r["net_profit"], 2)
+
+    # Monthly buckets (for chart)
+    monthly = {}
+    for r in rows:
+        if not r["sold_at"]:
+            continue
+        month = r["sold_at"][:7]  # "YYYY-MM"
+        if month not in monthly:
+            monthly[month] = {"revenue": 0, "net": 0, "count": 0}
+        monthly[month]["revenue"] = round(monthly[month]["revenue"] + r["sale_price"], 2)
+        monthly[month]["net"] = round(monthly[month]["net"] + r["net_profit"], 2)
+        monthly[month]["count"] += 1
+    monthly_list = [{"month": k, **v} for k, v in sorted(monthly.items())]
+
+    return {
+        "rows": rows,
+        "summary": {
+            "count": len(rows),
+            "total_revenue": round(total_revenue, 2),
+            "total_fees": round(total_fees, 2),
+            "total_shipping": round(total_shipping, 2),
+            "total_cost": round(total_cost, 2),
+            "total_net": total_net,
+            "avg_roi_pct": round(
+                sum(r["roi_pct"] for r in rows if r["roi_pct"] is not None)
+                / max(1, sum(1 for r in rows if r["roi_pct"] is not None)), 1
+            ) if rows else None,
+        },
+        "by_platform": by_platform,
+        "monthly": monthly_list,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Auto-outreach (manual trigger + full pipeline)
+# ─────────────────────────────────────────────────────────────
+
+@router.post("/listings/{listing_id}/send-outreach")
+def send_listing_outreach(
+    listing_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Manually trigger outreach for a specific listing.
+
+    Works only for Facebook Marketplace listings. Runs in background so the
+    endpoint returns immediately with the listing's updated outreach_status.
+    """
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+    if not listing.url or "facebook.com" not in listing.url:
+        raise HTTPException(400, "Auto-outreach only works for Facebook Marketplace listings")
+
+    # Grab watchlist template before background task (avoids lazy-load issues)
+    template = ""
+    if listing.watchlist:
+        template = listing.watchlist.outreach_message_template or ""
+
+    listing.outreach_status = "QUEUED"
+    db.commit()
+
+    listing_url = listing.url
+    listing_title = listing.title
+    listing_id_val = listing.id
+
+    def _do_outreach():
+        from backend.services.outreach import send_outreach
+        from backend.models.database import SessionLocal as _SL
+        result = send_outreach(listing_url, listing_title, template)
+        bdb = _SL()
+        try:
+            row = bdb.query(Listing).filter(Listing.id == listing_id_val).first()
+            if row:
+                if result.success:
+                    row.outreach_status = "SENT"
+                    row.outreach_sent_at = datetime.utcnow()
+                else:
+                    row.outreach_status = "FAILED"
+                bdb.commit()
+        finally:
+            bdb.close()
+
+    background_tasks.add_task(_do_outreach)
+    return {"ok": True, "outreach_status": "QUEUED", "listing_id": listing_id}
+
+
+@router.post("/listings/{listing_id}/full-pipeline")
+def full_pipeline(
+    listing_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Promote listing → inventory, trigger price suggestion, and (if watchlist has
+    auto_list_on_buy) create a Facebook sell listing once pricing completes.
+
+    Steps run in background — returns immediately with the new inventory item.
+    """
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+
+    # Step 1: promote (idempotent)
+    existing = db.query(InventoryItem).filter(
+        InventoryItem.source_listing_id == listing_id
+    ).first()
+    if existing:
+        item = existing
+    else:
+        item = InventoryItem(
+            title=listing.title,
+            description=listing.description or "",
+            category=listing.watchlist.category if listing.watchlist else None,
+            condition="GOOD",
+            purchase_price=listing.price,
+            purchase_date=datetime.utcnow(),
+            source_listing_id=listing_id,
+            notes=f"Auto-pipeline from {listing.source} listing.",
+            status="DRAFT",
+        )
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+
+    item_id = item.id
+    auto_list = listing.watchlist.auto_list_on_buy if listing.watchlist else False
+    image_url = listing.image_url
+
+    def _pipeline():
+        import time as _time
+        import httpx
+        import uuid as _uuid
+        from pathlib import Path as _Path
+        from backend.models.database import SessionLocal as _SL
+        from backend.services.auto_pricing import suggest_price as _suggest
+        from backend.services.paths import get_inventory_item_photos_dir
+
+        bdb = _SL()
+        try:
+            inv_item = bdb.query(InventoryItem).filter(InventoryItem.id == item_id).first()
+            if not inv_item:
+                return
+
+            # Download image if needed
+            if image_url and not inv_item.photos:
+                try:
+                    resp = httpx.get(image_url, timeout=15.0, follow_redirects=True)
+                    if resp.status_code == 200 and len(resp.content) <= MAX_PHOTO_BYTES:
+                        ext = _Path(image_url.split("?")[0]).suffix.lower()
+                        if ext not in ALLOWED_PHOTO_EXT:
+                            ext = ".jpg"
+                        fname = f"{_uuid.uuid4().hex}{ext}"
+                        photo_dir = get_inventory_item_photos_dir(item_id)
+                        (photo_dir / fname).write_bytes(resp.content)
+                        photo = InventoryPhoto(
+                            inventory_item_id=item_id,
+                            file_path=fname,
+                            order_index=0,
+                        )
+                        bdb.add(photo)
+                        bdb.commit()
+                except Exception as e:
+                    logger.warning(f"Pipeline: failed to download image: {e}")
+
+            # Step 2: price suggestion
+            bdb.refresh(inv_item)
+            suggestion = _suggest(inv_item.title, inv_item.condition or "GOOD", bdb)
+            inv_item.price_suggestion = suggestion.to_dict()
+            if suggestion.suggested_price:
+                inv_item.listed_price = suggestion.suggested_price
+            bdb.commit()
+            bdb.refresh(inv_item)
+
+            # Step 3: auto-list on Facebook if enabled
+            if auto_list and inv_item.listed_price:
+                from backend.services.sellers.facebook import FacebookSeller
+                from backend.services.sellers.base import ListingDraft
+
+                photo_paths = [
+                    str(get_inventory_item_photos_dir(item_id) / p.file_path)
+                    for p in inv_item.photos
+                ]
+                draft = ListingDraft(
+                    title=inv_item.title,
+                    description=inv_item.description or "",
+                    price=inv_item.listed_price,
+                    condition=inv_item.condition or "GOOD",
+                    category=inv_item.category or "",
+                    photo_paths=photo_paths,
+                )
+                seller = FacebookSeller()
+                result = seller.create_listing(draft)
+                sl = SellListing(
+                    inventory_item_id=item_id,
+                    platform="facebook",
+                    platform_listing_id=result.platform_listing_id,
+                    platform_url=result.platform_url,
+                    listed_price=inv_item.listed_price,
+                    status="POSTED" if result.success else "FAILED",
+                    listed_at=datetime.utcnow() if result.success else None,
+                    error_message=result.error_message,
+                    screenshot_path=result.screenshot_path,
+                    action_url=result.action_url,
+                )
+                if result.extra:
+                    sl.raw_metadata = result.extra
+                bdb.add(sl)
+                bdb.commit()
+
+        except Exception as e:
+            logger.error(f"Full pipeline error for item {item_id}: {e}", exc_info=True)
+        finally:
+            bdb.close()
+
+    background_tasks.add_task(_pipeline)
+
+    return {
+        "ok": True,
+        "inventory_item_id": item_id,
+        "auto_list": auto_list,
+        "message": "Pipeline started: pricing + listing in background",
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Source config
+# ─────────────────────────────────────────────────────────────
 
 @router.post("/sources/{source_name}/update-config")
 def update_source_config(

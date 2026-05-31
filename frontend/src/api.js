@@ -59,4 +59,43 @@ export const updateSourceConfig = (name, config) => api.post(`/sources/${name}/u
 export const syncPriceCharting = (maxTitles = 50) => api.post('/gamecube/sync-pricecharting', null, { params: { max_titles: maxTitles } }).then(r => r.data)
 export const getSyncStatus = () => api.get('/gamecube/sync-status').then(r => r.data)
 
+// ── Inventory (sell-side) ──────────────────────────────────
+export const getInventory = (params = {}) => api.get('/inventory', { params }).then(r => r.data)
+export const getInventoryItem = (id) => api.get(`/inventory/${id}`).then(r => r.data)
+export const createInventoryItem = (data) => api.post('/inventory', data).then(r => r.data)
+export const updateInventoryItem = (id, data) => api.patch(`/inventory/${id}`, data).then(r => r.data)
+export const deleteInventoryItem = (id) => api.delete(`/inventory/${id}`).then(r => r.data)
+export const uploadInventoryPhotos = (id, files) => {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  return api.post(`/inventory/${id}/photos`, form).then(r => r.data)
+}
+export const deleteInventoryPhoto = (photoId) => api.delete(`/inventory/photos/${photoId}`).then(r => r.data)
+export const reorderInventoryPhotos = (photoIds) => api.post('/inventory/photos/reorder', { photo_ids: photoIds }).then(r => r.data)
+export const promoteListingToInventory = (listingId) => api.post(`/listings/${listingId}/promote-to-inventory`).then(r => r.data)
+export const sendListingOutreach = (listingId) => api.post(`/listings/${listingId}/send-outreach`).then(r => r.data)
+export const runFullPipeline = (listingId) => api.post(`/listings/${listingId}/full-pipeline`).then(r => r.data)
+
+export const inventoryPhotoUrl = (photo) => `${BASE}${photo.url}`
+
+export const triggerPriceSuggestion = (id) => api.post(`/inventory/${id}/price-suggestion`).then(r => r.data)
+export const getPriceSuggestion = (id) => api.get(`/inventory/${id}/price-suggestion`).then(r => r.data)
+
+export const analyzePhoto = (file, mode) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/analyze-photo', form, { params: { mode } }).then(r => r.data)
+}
+
+// ── Sell listings ─────────────────────────────────────────────
+export const getSellListings = (itemId) => api.get(`/inventory/${itemId}/sell-listings`).then(r => r.data)
+export const createSellListing = (itemId, data) => api.post(`/inventory/${itemId}/sell-listings`, data).then(r => r.data)
+export const updateSellListing = (id, data) => api.patch(`/sell-listings/${id}`, data).then(r => r.data)
+export const markSellListingSold = (id, data) => api.post(`/sell-listings/${id}/mark-sold`, data).then(r => r.data)
+export const removeSellListing = (id) => api.post(`/sell-listings/${id}/remove`).then(r => r.data)
+
+// ── Sell analytics ─────────────────────────────────────────
+export const getSellDashboard = () => api.get('/sell/dashboard').then(r => r.data)
+export const getSellProfit = (params = {}) => api.get('/sell/profit', { params }).then(r => r.data)
+
 export default api

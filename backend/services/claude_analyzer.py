@@ -164,3 +164,74 @@ def review_listing(
             error=str(e),
             model=model,
         )
+
+
+# ── Photo-to-form fill ────────────────────────────────────────────────── #
+
+_INVENTORY_FILL_PROMPT = """\
+You are analyzing a photo of an item someone wants to sell on Facebook Marketplace or eBay.
+Return ONLY a JSON object — no markdown fences, no prose. Use this exact schema:
+{
+  "title": "concise listing title including brand/model if visible (e.g. 'Nintendo GameCube Console Purple')",
+  "category": "single-word or short category (e.g. gaming, electronics, furniture, clothing, tools, appliances)",
+  "condition": "exactly one of: NEW, LIKE_NEW, GOOD, FAIR, POOR",
+  "description": "2-3 sentence listing description mentioning key features and any visible wear or issues",
+  "listed_price": suggested_selling_price_as_a_number_or_null
+}"""
+
+_WATCHLIST_FILL_PROMPT = """\
+You are analyzing a photo of an item someone wants to find and flip for profit on Facebook Marketplace, eBay, Craigslist, etc.
+Return ONLY a JSON object — no markdown fences, no prose. Use this exact schema:
+{
+  "name": "short watchlist name (e.g. 'Nintendo GameCube')",
+  "keywords": ["keyword1", "keyword2"],
+  "brands": ["brand1"],
+  "negative_keywords": ["broken", "parts only", "for parts", "cracked", "damaged"],
+  "category": "single-word or short category",
+  "min_price": suggested_minimum_buy_price_as_number,
+  "max_price": suggested_maximum_buy_price_as_number,
+  "notes": "brief notes on what to look for or avoid"
+}"""
+
+
+def analyze_photo(
+    *,
+    image_bytes: bytes,
+    media_type: str,
+    mode: str,
+    api_key: str,
+    model: str = "claude-haiku-4-5",
+) -> dict:
+    """
+    Analyze a user-uploaded photo and return pre-filled form fields.
+    mode='inventory' → title, category, condition, description, listed_price
+    mode='watchlist' → name, keywords, brands, negative_keywords, category, min_price, max_price, notes
+    """
+    from anthropic import Anthropic
+
+    system_prompt = _INVENTORY_FILL_PROMPT if mode == "inventory" else _WATCHLIST_FILL_PROMPT
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    client = Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=600,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": b64},
+                },
+                {"type": "text", "text": "Analyze this item and return the JSON."},
+            ],
+        }],
+    )
+
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    return json.loads(raw)

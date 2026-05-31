@@ -14,6 +14,8 @@ DEFAULTS = {
     "global_schedule_interval_minutes": 60,
     "heartbeat_enabled": False,
     "heartbeat_discord_webhook_id": None,
+    "watchdog_enabled": True,
+    "watchdog_grace_multiplier": 2,
     "alert_on_scraper_failure": True,
     "gamecube_bundle_discount": 0.85,
     "gamecube_low_demand_discount": 0.60,

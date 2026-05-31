@@ -3,6 +3,50 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Play, ToggleLeft, ToggleRight, ChevronDown, ChevronUp } from 'lucide-react'
 import { getSources, getSourceRuns, triggerRun, toggleSource } from '../api'
 
+const LABELS = { facebook: 'Facebook', mercari: 'Mercari' }
+
+function LoginButton({ sourceName }) {
+  const [status, setStatus] = useState('idle') // idle | opening | done | error
+
+  const handleLogin = async () => {
+    setStatus('opening')
+    try {
+      await fetch(`/api/sources/${sourceName}/login`, { method: 'POST' })
+      setStatus('done')
+      setTimeout(() => setStatus('idle'), 8000)
+    } catch {
+      setStatus('error')
+      setTimeout(() => setStatus('idle'), 4000)
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      background: 'rgba(255,149,0,0.08)', border: '1px solid rgba(255,149,0,0.25)',
+      borderRadius: 8, padding: '10px 14px', marginBottom: 8,
+    }}>
+      <span>🔑</span>
+      <div style={{ flex: 1, fontSize: 13 }}>
+        {status === 'done'
+          ? `✅ ${LABELS[sourceName]} login window opened — sign in, then close the browser. Your session is saved automatically.`
+          : status === 'error'
+          ? '❌ Failed to open login window. Is the backend running?'
+          : `Log into ${LABELS[sourceName]} once so the scraper can run silently in the background.`
+        }
+      </div>
+      <button
+        className="btn btn-sm btn-primary"
+        onClick={handleLogin}
+        disabled={status === 'opening' || status === 'done'}
+        style={{ whiteSpace: 'nowrap' }}
+      >
+        {status === 'opening' ? 'Opening…' : status === 'done' ? 'Opened ✓' : `Log into ${LABELS[sourceName]}`}
+      </button>
+    </div>
+  )
+}
+
 const STATUS_BADGE = {
   healthy: <span className="badge badge-green">Healthy</span>,
   warning: <span className="badge badge-yellow">Warning</span>,
@@ -80,10 +124,8 @@ function SourceRow({ source }) {
         <tr>
           <td colSpan={6} style={{ background: 'var(--bg)', padding: '0 0 0 32px' }}>
             <div style={{ padding: '12px 0' }}>
-              {source.name === 'facebook' && (
-                <div className="error-box" style={{ marginBottom: 8 }}>
-                  🔑 To log into Facebook: run <code style={{ background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: 4 }}>python -m platapicker facebook-login</code> in your terminal.
-                </div>
+              {(source.name === 'facebook' || source.name === 'mercari') && (
+                <LoginButton sourceName={source.name} />
               )}
               <div className="card-title">Recent Runs</div>
               {!runs ? <div className="text-muted">Loading...</div> : (

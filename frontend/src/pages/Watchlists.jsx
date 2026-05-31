@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Edit2, Trash2, MapPin, DollarSign, Clock, ToggleLeft, ToggleRight, Sparkles, ClipboardPaste } from 'lucide-react'
-import { getWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, toggleWatchlist, getWebhooks } from '../api'
+import { Plus, Edit2, Trash2, MapPin, DollarSign, Clock, ToggleLeft, ToggleRight, Sparkles, ClipboardPaste, Camera, RefreshCw } from 'lucide-react'
+import { getWatchlists, createWatchlist, updateWatchlist, deleteWatchlist, toggleWatchlist, getWebhooks, analyzePhoto } from '../api'
 
 // ── Claude prompt builder ────────────────────────────────────────────── //
 function buildClaudePrompt(description) {
@@ -56,14 +56,25 @@ const EMPTY_FORM = {
   sources_enabled: [], run_frequency_minutes: 60,
   min_rating_to_alert: 'GOOD', min_profit_margin: 0.20, min_profit_dollars: 50,
   discord_webhook_id: null, notes: '',
+  auto_outreach_enabled: false,
+  outreach_message_template: '',
+  auto_list_on_buy: false,
 }
 
 // ── Claude AI Assistant Panel ────────────────────────────────────────── //
 function ClaudeAssistant({ onApply }) {
+  const [inputMode, setInputMode] = useState('text') // 'text' | 'photo'
+
+  // text-mode state
   const [description, setDescription] = useState('')
   const [pasteText, setPasteText] = useState('')
-  const [step, setStep] = useState('input') // 'input' | 'waiting' | 'paste' | 'error'
+  const [step, setStep] = useState('input') // 'input' | 'waiting' | 'paste'
   const [parseError, setParseError] = useState(null)
+
+  // photo-mode state
+  const [analyzing, setAnalyzing] = useState(false)
+  const [photoError, setPhotoError] = useState(null)
+  const photoRef = useRef()
 
   const handleGenerate = async () => {
     if (!description.trim()) return
@@ -79,7 +90,6 @@ function ClaudeAssistant({ onApply }) {
   const handleImport = () => {
     setParseError(null)
     let text = pasteText.trim()
-    // Strip markdown code fences if Claude wrapped it
     text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
     try {
       const data = JSON.parse(text)
@@ -101,74 +111,145 @@ function ClaudeAssistant({ onApply }) {
     }
   }
 
+  async function handlePhotoFill(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setAnalyzing(true)
+    setPhotoError(null)
+    try {
+      const data = await analyzePhoto(file, 'watchlist')
+      onApply({
+        name: data.name || '',
+        keywords: Array.isArray(data.keywords) ? data.keywords : [],
+        brands: Array.isArray(data.brands) ? data.brands : [],
+        negative_keywords: Array.isArray(data.negative_keywords) ? data.negative_keywords : [],
+        min_price: typeof data.min_price === 'number' ? data.min_price : 0,
+        max_price: typeof data.max_price === 'number' ? data.max_price : 99999,
+        notes: data.notes || '',
+      })
+    } catch (err) {
+      setPhotoError(err?.response?.data?.detail || 'Photo analysis failed. Check your Claude API key in Settings.')
+    } finally {
+      setAnalyzing(false)
+      e.target.value = ''
+    }
+  }
+
   return (
     <div className="claude-assistant">
-      <div className="claude-assistant-header">
-        <Sparkles size={14} style={{ color: 'var(--accent)' }} />
-        <span>Generate with Claude <span className="claude-badge">Free</span></span>
+      <div className="claude-assistant-header" style={{ justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Sparkles size={14} style={{ color: 'var(--accent)' }} />
+          <span>Generate with Claude <span className="claude-badge">Free</span></span>
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button
+            type="button"
+            className={`btn btn-sm ${inputMode === 'text' ? 'btn-accent' : 'btn-secondary'}`}
+            style={{ padding: '2px 8px', fontSize: 11 }}
+            onClick={() => setInputMode('text')}
+          >Text</button>
+          <button
+            type="button"
+            className={`btn btn-sm ${inputMode === 'photo' ? 'btn-accent' : 'btn-secondary'}`}
+            style={{ padding: '2px 8px', fontSize: 11 }}
+            onClick={() => setInputMode('photo')}
+          ><Camera size={11} style={{ marginRight: 3 }} />Photo</button>
+        </div>
       </div>
 
-      {step === 'input' && (
-        <div className="claude-input-row">
+      {inputMode === 'text' && (
+        <>
+          {step === 'input' && (
+            <div className="claude-input-row">
+              <input
+                type="text"
+                className="claude-desc-input"
+                placeholder="Describe what you're looking for… e.g. ultrawide monitor, vintage turntable"
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleGenerate()}
+              />
+              <button
+                type="button"
+                className="btn btn-accent btn-sm"
+                onClick={handleGenerate}
+                disabled={!description.trim()}
+              >
+                Open Claude →
+              </button>
+            </div>
+          )}
+
+          {step === 'waiting' && (
+            <div className="claude-step">
+              <div className="claude-step-text">
+                ✅ Prompt copied to clipboard — paste it into Claude, then copy the JSON response it gives you.
+              </div>
+              <button type="button" className="btn btn-sm btn-secondary" onClick={() => setStep('paste')}>
+                <ClipboardPaste size={13} /> I have the response
+              </button>
+            </div>
+          )}
+
+          {step === 'paste' && (
+            <div className="claude-paste-area">
+              <div className="claude-step-text" style={{ marginBottom: 8 }}>
+                ✅ Prompt copied — paste Claude's JSON response below:
+              </div>
+              {parseError && <div className="claude-error">{parseError}</div>}
+              <textarea
+                className="claude-paste-input"
+                placeholder="Paste Claude's JSON response here…"
+                value={pasteText}
+                onChange={e => setPasteText(e.target.value)}
+                rows={5}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={handleImport}
+                  disabled={!pasteText.trim()}
+                >
+                  Apply to Form
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => { setStep('input'); setParseError(null); setPasteText('') }}
+                >
+                  Start Over
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {inputMode === 'photo' && (
+        <div>
+          {photoError && <div className="claude-error" style={{ marginBottom: 8 }}>{photoError}</div>}
           <input
-            type="text"
-            className="claude-desc-input"
-            placeholder="Describe what you're looking for… e.g. ultrawide monitor, vintage turntable"
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleGenerate()}
+            ref={photoRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={handlePhotoFill}
           />
           <button
             type="button"
             className="btn btn-accent btn-sm"
-            onClick={handleGenerate}
-            disabled={!description.trim()}
+            onClick={() => photoRef.current?.click()}
+            disabled={analyzing}
+            style={{ width: '100%' }}
           >
-            Open Claude →
+            {analyzing
+              ? <><RefreshCw size={13} className="spin" /> Analyzing photo…</>
+              : <><Camera size={13} /> Upload a photo — Claude fills the form</>}
           </button>
-        </div>
-      )}
-
-      {step === 'waiting' && (
-        <div className="claude-step">
-          <div className="claude-step-text">
-            ✅ Prompt copied to clipboard — paste it into Claude, then copy the JSON response it gives you.
-          </div>
-          <button type="button" className="btn btn-sm btn-secondary" onClick={() => setStep('paste')}>
-            <ClipboardPaste size={13} /> I have the response
-          </button>
-        </div>
-      )}
-
-      {step === 'paste' && (
-        <div className="claude-paste-area">
-          <div className="claude-step-text" style={{ marginBottom: 8 }}>
-            ✅ Prompt copied — paste Claude's JSON response below:
-          </div>
-          {parseError && <div className="claude-error">{parseError}</div>}
-          <textarea
-            className="claude-paste-input"
-            placeholder="Paste Claude's JSON response here…"
-            value={pasteText}
-            onChange={e => setPasteText(e.target.value)}
-            rows={5}
-          />
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              onClick={handleImport}
-              disabled={!pasteText.trim()}
-            >
-              Apply to Form
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => { setStep('input'); setParseError(null); setPasteText('') }}
-            >
-              Start Over
-            </button>
+          <div className="claude-step-text" style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+            Upload a photo of the item you want to flip. Claude will suggest keywords, price range, and search terms.
           </div>
         </div>
       )}
@@ -523,6 +604,56 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
               </div>
             </div>
 
+            {/* AUTOMATION */}
+            <div className="form-section">
+              <div className="form-section-title">Automation</div>
+
+              <div className="form-group" style={{ marginBottom: 14 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={form.auto_outreach_enabled}
+                    onChange={e => set('auto_outreach_enabled', e.target.checked)}
+                  />
+                  <span style={{ fontWeight: 600 }}>Auto-message sellers on Facebook</span>
+                </label>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, marginLeft: 24 }}>
+                  When a qualifying deal is found, automatically send a message to the seller via
+                  your existing Facebook session. Rate limited to 15 messages/hour.
+                </div>
+              </div>
+
+              {form.auto_outreach_enabled && (
+                <div className="form-group" style={{ marginBottom: 14 }}>
+                  <label>Message template</label>
+                  <textarea
+                    value={form.outreach_message_template}
+                    onChange={e => set('outreach_message_template', e.target.value)}
+                    placeholder={`Hi! Is {title} still available? I can pick it up today for cash. Please let me know — thanks!`}
+                    style={{ minHeight: 70, fontFamily: 'monospace', fontSize: 12 }}
+                  />
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Use <code style={{ background: 'var(--bg-2)', padding: '1px 4px', borderRadius: 3 }}>{'{title}'}</code> and <code style={{ background: 'var(--bg-2)', padding: '1px 4px', borderRadius: 3 }}>{'{url}'}</code> as placeholders. Leave blank for default message.
+                  </div>
+                </div>
+              )}
+
+              <div className="form-group" style={{ marginBottom: 4 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={form.auto_list_on_buy}
+                    onChange={e => set('auto_list_on_buy', e.target.checked)}
+                  />
+                  <span style={{ fontWeight: 600 }}>Auto-list on Facebook after purchase</span>
+                </label>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, marginLeft: 24 }}>
+                  When you use "Full Pipeline" on a listing, it will automatically price the item
+                  and create a Facebook Marketplace listing without additional clicks.
+                </div>
+              </div>
+            </div>
+
             {/* NOTES */}
             <div className="form-section">
               <div className="form-section-title">Notes</div>
@@ -570,6 +701,16 @@ function WatchlistCard({ wl, onEdit, onDelete, onToggle }) {
             {wl.enabled
               ? <span className="badge badge-green">Active</span>
               : <span className="badge badge-gray">Paused</span>}
+            {wl.auto_outreach_enabled && (
+              <span className="badge" style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)', fontSize: 10 }}>
+                ✉ Auto-message
+              </span>
+            )}
+            {wl.auto_list_on_buy && (
+              <span className="badge" style={{ background: 'rgba(34,197,94,0.12)', color: 'var(--green)', border: '1px solid rgba(34,197,94,0.25)', fontSize: 10 }}>
+                ⚡ Auto-list
+              </span>
+            )}
           </div>
 
           {/* Meta row */}

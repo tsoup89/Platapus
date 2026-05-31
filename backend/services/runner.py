@@ -397,6 +397,38 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                     alert_count += 1
 
         run.alert_count = alert_count
+
+        # ── Auto-outreach ─────────────────────────────────────────────────────
+        # If watchlist has auto_outreach_enabled and the listing is from FB
+        # Marketplace, send an automated message to the seller.
+        if watchlist.auto_outreach_enabled:
+            from backend.services.outreach import send_outreach, _check_rate_limit
+            for listing, score, review in qualifying_with_review:
+                if not listing.url or "facebook.com" not in listing.url:
+                    continue
+                if listing.outreach_status in ("SENT", "QUEUED"):
+                    continue
+
+                allowed, reason = _check_rate_limit()
+                if not allowed:
+                    logger.info(f"Outreach rate limited ({reason}) — skipping remaining")
+                    break
+
+                template = watchlist.outreach_message_template or ""
+                listing.outreach_status = "QUEUED"
+                db.flush()
+
+                result = send_outreach(listing.url, listing.title, template)
+                if result.success:
+                    listing.outreach_status = "SENT"
+                    listing.outreach_sent_at = datetime.utcnow()
+                    logger.info(f"✉ Outreach sent to seller for '{listing.title}'")
+                else:
+                    listing.outreach_status = "FAILED"
+                    logger.warning(
+                        f"Outreach failed for '{listing.title}': {result.error}"
+                    )
+
         run.status = "success"
         run.ended_at = datetime.utcnow()
 

@@ -42,3 +42,15 @@ def get_logs_dir() -> Path:
     p = get_data_dir() / "logs"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def get_inventory_photos_dir() -> Path:
+    p = get_data_dir() / "inventory_photos"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_inventory_item_photos_dir(item_id: int) -> Path:
+    p = get_inventory_photos_dir() / str(item_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p

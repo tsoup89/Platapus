@@ -33,6 +33,10 @@ class Watchlist(Base):
     min_profit_dollars = Column(Float, default=50)
     discord_webhook_id = Column(Integer, ForeignKey("discord_webhooks.id"), nullable=True)
     notes = Column(Text, default="")
+    # ── Automation ──────────────────────────────────────────────────────────
+    auto_outreach_enabled = Column(Boolean, default=False)
+    outreach_message_template = Column(Text, default="")  # empty = use default
+    auto_list_on_buy = Column(Boolean, default=False)     # auto-list on FB after promote
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
@@ -157,6 +161,9 @@ class Listing(Base):
     ignored = Column(Boolean, default=False)
     alert_sent = Column(Boolean, default=False)
     alert_sent_at = Column(DateTime, nullable=True)
+    # ── Auto-outreach ───────────────────────────────────────────────────────
+    outreach_status = Column(String, nullable=True)    # None | QUEUED | SENT | FAILED
+    outreach_sent_at = Column(DateTime, nullable=True)
 
     watchlist = relationship("Watchlist", back_populates="listings")
     deal_score = relationship("DealScore", back_populates="listing", uselist=False)
@@ -325,6 +332,99 @@ class ClaudeReview(Base):
     @positives.setter
     def positives(self, value):
         self.positives_json = json.dumps(value)
+
+
+class InventoryItem(Base):
+    __tablename__ = "inventory_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, default="")
+    category = Column(String, nullable=True)
+    condition = Column(String, default="GOOD")  # NEW, LIKE_NEW, GOOD, FAIR, POOR
+    purchase_price = Column(Float, nullable=True)
+    purchase_date = Column(DateTime, nullable=True)
+    source_listing_id = Column(Integer, ForeignKey("listings.id"), nullable=True)
+    notes = Column(Text, default="")
+    status = Column(String, default="DRAFT")  # DRAFT, LISTED, SOLD, ARCHIVED
+    listed_price = Column(Float, nullable=True)   # target sell price (filled via auto-pricing or manual)
+    price_suggestion_json = Column(Text, nullable=True)  # cached auto-pricing result
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    source_listing = relationship("Listing", foreign_keys=[source_listing_id])
+    photos = relationship(
+        "InventoryPhoto",
+        back_populates="item",
+        order_by="InventoryPhoto.order_index",
+        cascade="all, delete-orphan",
+    )
+    sell_listings = relationship(
+        "SellListing",
+        back_populates="item",
+        order_by="SellListing.created_at",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def price_suggestion(self):
+        if not self.price_suggestion_json:
+            return None
+        return json.loads(self.price_suggestion_json)
+
+    @price_suggestion.setter
+    def price_suggestion(self, value):
+        self.price_suggestion_json = json.dumps(value) if value is not None else None
+
+
+class InventoryPhoto(Base):
+    __tablename__ = "inventory_photos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False)
+    file_path = Column(String, nullable=False)  # relative to inventory_photos dir
+    order_index = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+
+    item = relationship("InventoryItem", back_populates="photos")
+
+
+class SellListing(Base):
+    """A listing of an InventoryItem on a sell-side marketplace platform."""
+    __tablename__ = "sell_listings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inventory_item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False)
+    platform = Column(String, nullable=False)  # "ebay" | "facebook"
+    platform_listing_id = Column(String, nullable=True)   # eBay item ID / FB listing ID
+    platform_url = Column(String, nullable=True)          # URL of the live listing
+    listed_price = Column(Float, nullable=True)
+    # DRAFT → POSTING → POSTED | FAILED; also SOLD | REMOVED
+    status = Column(String, default="DRAFT")
+    listed_at = Column(DateTime, nullable=True)
+    sold_at = Column(DateTime, nullable=True)
+    removed_at = Column(DateTime, nullable=True)
+    sale_price = Column(Float, nullable=True)
+    platform_fees = Column(Float, nullable=True)
+    shipping_cost = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    screenshot_path = Column(String, nullable=True)  # last screenshot (debug / failure)
+    action_url = Column(String, nullable=True)        # manual-fallback URL for the frontend
+    raw_metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    item = relationship("InventoryItem", back_populates="sell_listings")
+
+    @property
+    def raw_metadata(self):
+        if not self.raw_metadata_json:
+            return {}
+        return json.loads(self.raw_metadata_json)
+
+    @raw_metadata.setter
+    def raw_metadata(self, value):
+        self.raw_metadata_json = json.dumps(value) if value is not None else None
 
 
 class MarketValueCache(Base):
