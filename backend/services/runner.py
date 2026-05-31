@@ -1,6 +1,6 @@
 """
 Orchestrates scraper runs: fetches listings, scores them, saves to DB,
-and sends Discord alerts.
+and sends Discord alerts and Expo push notifications.
 """
 import logging
 from datetime import datetime
@@ -25,6 +25,7 @@ from backend.scrapers.ebay import EbayScraper
 from backend.scoring.deal_scorer import score_listing
 from backend.scoring.gamecube_scorer import score_gamecube_listing
 from backend.services import discord as discord_service
+from backend.services import push_notifications as push_service
 from backend.services.settings import get_all_settings
 
 logger = logging.getLogger("platapicker.runner")
@@ -395,6 +396,21 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                     listing.alert_sent = True
                     listing.alert_sent_at = datetime.utcnow()
                     alert_count += 1
+
+        # Send Expo push notifications for every qualifying deal (alongside Discord).
+        # Use qualifying_with_review so push respects the Claude review gate, matching Discord.
+        push_token = settings.get("expo_push_token")
+        if push_token and qualifying_with_review:
+            for listing, score, review in qualifying_with_review:
+                push_service.send_deal_push(
+                    token=push_token,
+                    title=listing.title,
+                    price=listing.price or 0,
+                    rating=score.rating,
+                    listing_id=listing.id,
+                    source=listing.source,
+                    estimated_profit=score.estimated_profit,
+                )
 
         run.alert_count = alert_count
 

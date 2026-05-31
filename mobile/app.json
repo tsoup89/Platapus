@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Platapicker",
+    "slug": "platapicker-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.platapicker.mobile"
+    },
+    "android": {
+      "package": "com.platapicker.mobile"
+    },
+    "plugins": [
+      "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Platapicker to access your photos to add items to inventory."
+        }
+      ]
+    ]
+  }
+}
