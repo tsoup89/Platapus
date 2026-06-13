@@ -155,6 +155,49 @@ def _seed_watchlists(db: Session):
             min_profit_dollars=100,
             notes="Prioritize premium brands. Penalize missing pieces or cushion-only listings.",
         ),
+        Watchlist(
+            name="Pokémon — Mega Evolution: Ascended Heroes (Sealed)",
+            enabled=True,
+            category="pokemon_sealed",
+            keywords_json=json.dumps([
+                # Only the first 5 keywords are used to build searches (runner caps at 5),
+                # so the most important sealed product types are listed first.
+                "Mega Evolution Ascended Heroes booster box",
+                "Mega Evolution Ascended Heroes elite trainer box",
+                "Mega Evolution Ascended Heroes booster bundle",
+                "Mega Evolution Ascended Heroes booster pack",
+                "Mega Evolution Ascended Heroes sealed",
+                # Remaining keywords still boost scoring confidence on matched listings.
+                "Ascended Heroes ETB",
+                "Ascended Heroes booster case",
+            ]),
+            negative_keywords_json=json.dumps([
+                # Exclude anything that signals an opened product, singles, or slabs.
+                "opened", "open box", "single card", "singles", "card lot",
+                "loose cards", "bulk", "graded", "psa", "cgc", "bgs",
+                "proxy", "custom", "repack", "resealed", "weighed",
+                "empty box", "no cards", "code card", "online code",
+            ]),
+            brands_json=json.dumps([
+                "Pokemon", "Pokémon", "Pokemon TCG", "The Pokemon Company",
+            ]),
+            aliases_json=json.dumps([]),
+            locations_json=json.dumps(["New York, NY"]),
+            radius_miles=100,
+            min_price=4,
+            max_price=600,
+            sources_enabled_json=json.dumps(["facebook", "auctionninja", "craigslist"]),
+            run_frequency_minutes=60,
+            min_rating_to_alert="GOOD",
+            min_profit_margin=0.20,
+            min_profit_dollars=20,
+            notes=(
+                "Sealed-only watchlist for the Mega Evolution: Ascended Heroes set — "
+                "booster boxes, ETBs, booster bundles, and sealed single packs. "
+                "Negative keywords filter out opened product, singles, graded slabs, "
+                "and resealed/weighed listings. Valued against eBay sold comps."
+            ),
+        ),
     ]
 
     for wl in watchlists:

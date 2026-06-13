@@ -64,6 +64,7 @@ function WatchlistModal({ initial, webhooks, onClose, onSave }) {
                 <option value="gamecube">GameCube</option>
                 <option value="espresso">Espresso</option>
                 <option value="outdoor_furniture">Outdoor Furniture</option>
+                <option value="pokemon_sealed">Pokémon (Sealed)</option>
               </select>
             </div>
           </div>
