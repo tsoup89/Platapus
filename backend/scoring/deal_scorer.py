@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 import re
 
+from .relevance import check_relevance, find_matches
+
 
 DEAL_THRESHOLDS = {
     "STEAL": 0.45,
@@ -69,22 +71,36 @@ def score_listing(
 
     text = f"{title} {description}".lower()
 
-    # --- Negative keyword check ---
-    neg_hits = [kw for kw in watchlist_negative_keywords if kw.lower() in text]
-    if neg_hits:
-        result.warnings.append(f"Negative keyword(s) matched: {', '.join(neg_hits)}")
+    # --- Relevance gate ---
+    # Reject the listing outright if it hits a negative keyword OR if it doesn't
+    # match any watchlist keyword/brand. Without this gate, an off-topic listing
+    # (e.g. perfume returned by a broad Craigslist/AuctionNinja search) would be
+    # rated purely on its own price-to-value ratio and alerted as a "deal".
+    relevance = check_relevance(
+        title, description, watchlist_keywords, watchlist_brands,
+        watchlist_negative_keywords,
+    )
+    if not relevance.relevant:
+        if relevance.negative_hits:
+            result.warnings.append(
+                f"Negative keyword(s) matched: {', '.join(relevance.negative_hits)}"
+            )
+        else:
+            result.warnings.append(
+                "Off-topic: no watchlist keyword or brand matched — filtered out."
+            )
         result.rating = "PASS"
         result.score = 0
         return result
 
     # --- Brand match ---
-    matched_brands = [b for b in watchlist_brands if b.lower() in text]
+    matched_brands = find_matches(watchlist_brands, text)
     if matched_brands:
         result.reasons.append(f"Brand match: {', '.join(matched_brands)}")
         result.confidence += 0.3
 
     # --- Keyword match ---
-    kw_hits = [kw for kw in watchlist_keywords if kw.lower() in text]
+    kw_hits = find_matches(watchlist_keywords, text)
     if kw_hits:
         result.reasons.append(f"Keyword match: {', '.join(kw_hits[:3])}")
         result.confidence += min(len(kw_hits) * 0.1, 0.4)

@@ -21,6 +21,7 @@ from backend.scrapers.facebook import FacebookScraper
 from backend.scrapers.craigslist import CraigslistScraper
 from backend.scoring.deal_scorer import score_listing
 from backend.scoring.gamecube_scorer import score_gamecube_listing
+from backend.scoring.relevance import check_relevance
 from backend.services import discord as discord_service
 from backend.services.settings import get_all_settings
 
@@ -277,9 +278,38 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
             all_raw.extend(raw)
             run.raw_count += health.raw_count
 
+        # --- Relevance filter ---
+        # Broad site searches return many off-topic listings — Craigslist's
+        # "for sale" search matches loosely, and AuctionNinja estate auctions
+        # mix the target item in with perfume, jewelry, and bric-a-brac. Drop
+        # anything that doesn't match the watchlist's keywords/brands (or that
+        # hits a negative keyword) before we save, score, or alert on it.
+        relevant_raw = []
+        for item in all_raw:
+            verdict = check_relevance(
+                title=item.title,
+                description=item.description or "",
+                keywords=watchlist.keywords,
+                brands=watchlist.brands,
+                negative_keywords=watchlist.negative_keywords,
+            )
+            if verdict.relevant:
+                relevant_raw.append(item)
+            else:
+                run.filtered_count += 1
+                logger.debug(
+                    f"Filtered off-topic listing '{(item.title or '')[:60]}' "
+                    f"({source.name}): {verdict.reason}"
+                )
+        if run.filtered_count:
+            logger.info(
+                f"{source.name}/{watchlist.name}: filtered "
+                f"{run.filtered_count} off-topic listing(s) from {len(all_raw)} fetched"
+            )
+
         seen: set = set()
         new_listings = []
-        for item in all_raw:
+        for item in relevant_raw:
             key = item.source_listing_id or item.url or item.title
             if key in seen:
                 continue
@@ -353,7 +383,8 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
         db.commit()
         logger.info(
             f"✅ {source.name}/{watchlist.name}: "
-            f"{run.raw_count} raw, {run.parsed_count} new, "
+            f"{run.raw_count} raw, {run.filtered_count} off-topic, "
+            f"{run.parsed_count} new, "
             f"{run.duplicate_count} dupes, {alert_count} alerts"
         )
 
