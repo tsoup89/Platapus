@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from backend.models import get_db
 from backend.models.models import (
     Watchlist, Source, ScraperRun, Listing, DealScore,
-    DiscordWebhook, GameCubePrice, TitleMapping, AppSetting,
+    DiscordWebhook, GameCubePrice, EspressoPrice, TitleMapping, AppSetting,
     MarketValueCache, ClaudeReview,
     InventoryItem, InventoryPhoto, SellListing,
 )
@@ -28,6 +28,7 @@ from backend.api.schemas import (
     SourceOut, ScraperRunOut,
     ListingOut, DealScoreOut, ClaudeReviewOut,
     GameCubePriceOut, GameCubePriceUpdate, TitleMappingOut,
+    EspressoPriceOut, EspressoPriceUpdate,
     OverviewStats,
     InventoryItemCreate, InventoryItemUpdate, InventoryItemOut,
     SellListingOut, CreateSellListingIn, MarkSoldIn, UpdateSellListingIn,
@@ -671,6 +672,129 @@ async def import_gamecube_csv(file: UploadFile = File(...), db: Session = Depend
         "errors": errors,
         "message": f"Imported {imported} new titles, updated {updated} existing. Re-scored {rescored} listings.",
     }
+
+
+@router.delete("/gamecube/prices")
+def clear_gamecube_prices(db: Session = Depends(get_db)):
+    count = db.query(GameCubePrice).count()
+    db.query(GameCubePrice).delete()
+    db.commit()
+    return {"ok": True, "cleared": count, "message": f"Cleared {count} GameCube price rows."}
+
+
+# ── Espresso pricing CRUD ────────────────────────────────────────────────────
+
+@router.get("/espresso/prices", response_model=list[EspressoPriceOut])
+def list_espresso_prices(
+    search: str = "", offset: int = 0, limit: int = 500, db: Session = Depends(get_db)
+):
+    q = db.query(EspressoPrice)
+    if search:
+        q = q.filter(
+            (EspressoPrice.brand.ilike(f"%{search}%")) |
+            (EspressoPrice.model.ilike(f"%{search}%"))
+        )
+    return [EspressoPriceOut.from_orm_safe(p) for p in q.order_by(EspressoPrice.brand, EspressoPrice.model).offset(offset).limit(limit).all()]
+
+
+@router.put("/espresso/prices/{price_id}", response_model=EspressoPriceOut)
+def update_espresso_price(price_id: int, data: EspressoPriceUpdate, db: Session = Depends(get_db)):
+    ep = db.query(EspressoPrice).filter(EspressoPrice.id == price_id).first()
+    if not ep:
+        raise HTTPException(404, "Espresso price not found.")
+    if data.used_price is not None:
+        ep.used_price = data.used_price
+    if data.new_price is not None:
+        ep.new_price = data.new_price
+    if data.notes is not None:
+        ep.notes = data.notes
+    if data.aliases is not None:
+        ep.aliases = data.aliases
+    ep.last_updated = datetime.utcnow()
+    db.commit()
+    db.refresh(ep)
+    return EspressoPriceOut.from_orm_safe(ep)
+
+
+@router.post("/espresso/import")
+async def import_espresso_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """CSV columns: Brand, Model, Used Price, New Price, Notes (all except Brand optional)."""
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(400, "Please upload a CSV file.")
+    contents = await file.read()
+    try:
+        text = contents.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = contents.decode("cp1252")
+        except UnicodeDecodeError:
+            text = ""
+    if not text or "\x00" in text:
+        raise HTTPException(400, "Could not read the CSV file — save it as UTF-8 and try again.")
+
+    reader = csv.DictReader(io.StringIO(text))
+    imported = updated = 0
+    errors = []
+
+    for i, row in enumerate(reader):
+        brand = (row.get("Brand") or row.get("brand") or "").strip()
+        if not brand:
+            continue
+        model = (row.get("Model") or row.get("model") or "").strip()
+        notes = (row.get("Notes") or row.get("notes") or "").strip()
+
+        def safe_float(val):
+            if not val or str(val).strip() in ("", "N/A", "-"):
+                return None
+            try:
+                return float(str(val).replace("$", "").replace(",", "").strip())
+            except ValueError:
+                return None
+
+        used_price = safe_float(row.get("Used Price") or row.get("used_price") or row.get("Price") or "")
+        new_price = safe_float(row.get("New Price") or row.get("new_price") or "")
+        if used_price is None:
+            errors.append(f"Row {i+2}: missing Used Price for '{brand} {model}'")
+            continue
+
+        match_key = normalize_title(f"{brand} {model}".strip())
+        existing = db.query(EspressoPrice).filter(EspressoPrice.match_key == match_key).first()
+        if existing:
+            existing.used_price = used_price
+            if new_price is not None:
+                existing.new_price = new_price
+            if notes:
+                existing.notes = notes
+            existing.last_updated = datetime.utcnow()
+            updated += 1
+        else:
+            db.add(EspressoPrice(
+                brand=brand,
+                model=model,
+                match_key=match_key,
+                used_price=used_price,
+                new_price=new_price,
+                notes=notes,
+                last_updated=datetime.utcnow(),
+            ))
+            imported += 1
+
+    db.commit()
+    return {
+        "ok": True,
+        "imported": imported,
+        "updated": updated,
+        "errors": errors,
+        "message": f"Imported {imported} new machines, updated {updated} existing.",
+    }
+
+
+@router.delete("/espresso/prices")
+def clear_espresso_prices(db: Session = Depends(get_db)):
+    count = db.query(EspressoPrice).count()
+    db.query(EspressoPrice).delete()
+    db.commit()
+    return {"ok": True, "cleared": count, "message": f"Cleared {count} espresso price rows."}
 
 
 @router.get("/gamecube/unmatched", response_model=list[TitleMappingOut])

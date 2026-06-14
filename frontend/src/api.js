@@ -55,7 +55,18 @@ export const importGCCSV = (file) => {
   form.append('file', file)
   return api.post('/gamecube/import', form).then(r => r.data)
 }
+export const clearGCPrices = () => api.delete('/gamecube/prices').then(r => r.data)
 export const getUnmatched = () => api.get('/gamecube/unmatched').then(r => r.data)
+
+export const getEspressoPrices = (params = {}) => api.get('/espresso/prices', { params }).then(r => r.data)
+export const updateEspressoPrice = (id, data) => api.put(`/espresso/prices/${id}`, data).then(r => r.data)
+export const importEspressoCSV = (file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/espresso/import', form).then(r => r.data)
+}
+export const clearEspressoPrices = () => api.delete('/espresso/prices').then(r => r.data)
+export const rescoreEspresso = () => api.post('/maintenance/rescore-espresso').then(r => r.data)
 
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (data) => api.post('/settings', data).then(r => r.data)

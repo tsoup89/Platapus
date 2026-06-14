@@ -352,6 +352,41 @@ class GameCubePriceUpdate(BaseModel):
     aliases: Optional[list[str]] = None
 
 
+class EspressoPriceOut(BaseModel):
+    id: int
+    brand: str
+    model: str
+    match_key: str
+    used_price: float
+    new_price: Optional[float]
+    notes: str
+    aliases: list[str]
+    last_updated: datetime
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_orm_safe(cls, obj):
+        return cls(
+            id=obj.id,
+            brand=obj.brand,
+            model=obj.model,
+            match_key=obj.match_key,
+            used_price=obj.used_price,
+            new_price=obj.new_price,
+            notes=obj.notes or "",
+            aliases=obj.aliases,
+            last_updated=obj.last_updated,
+        )
+
+
+class EspressoPriceUpdate(BaseModel):
+    used_price: Optional[float] = None
+    new_price: Optional[float] = None
+    notes: Optional[str] = None
+    aliases: Optional[list[str]] = None
+
+
 class TitleMappingOut(BaseModel):
     id: int
     raw_text: str
