@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { EyeOff, Eye, Send, ExternalLink, Info, Bot, Package, MessageCircle, Zap } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { getListings, ignoreListing, unignoreListing, sendDiscord, getListingRaw, getWatchlists, triggerClaudeReview, promoteListingToInventory, sendListingOutreach, runFullPipeline } from '../api'
 
 function RatingBadge({ rating }) {
@@ -17,6 +17,127 @@ function fmtMoney(v) {
 function fmtDate(dt) {
   if (!dt) return '—'
   return new Date(dt + 'Z').toLocaleDateString()
+}
+
+function fmtPct(v) {
+  if (v == null) return '—'
+  return `${Number(v).toFixed(0)}%`
+}
+
+// Color a 0-100 score: green ≥70, yellow ≥40, gray below.
+function scoreColor(score) {
+  if (score == null) return 'var(--text-muted)'
+  if (score >= 70) return 'var(--green)'
+  if (score >= 40) return 'var(--yellow)'
+  return 'var(--text-muted)'
+}
+
+const RISK_BADGE = { LOW: 'badge-green', MEDIUM: 'badge-yellow', HIGH: 'badge-red' }
+const CONF_BADGE = { HIGH: 'badge-green', MEDIUM: 'badge-yellow', LOW: 'badge-gray' }
+
+// Where the estimated value came from — shown as a labelled badge.
+const VALUE_SOURCE_META = {
+  ebay:         { label: '🛒 eBay sold comps',  cls: 'badge-blue' },
+  maker_checker:{ label: '🤖 AI Maker-Checker', cls: 'badge-green' },
+  local_llm:    { label: '🤖 Local AI',         cls: 'badge-green' },
+  table:        { label: '📋 Price table',      cls: 'badge-gray' },
+  gamecube:     { label: '🎮 GameCube prices',  cls: 'badge-gray' },
+}
+
+function ValueSourceBadge({ score }) {
+  const meta = VALUE_SOURCE_META[score?.value_source]
+  if (!meta) return null
+  return <span className={`badge ${meta.cls}`} style={{ fontSize: 11 }}>{meta.label}</span>
+}
+
+// Full maker-checker breakdown: both models' numbers, agreement, and the verdict.
+function MakerCheckerPanel({ score }) {
+  const pb = score?.pricing_breakdown
+  if (!pb || (pb.maker?.value == null && pb.checker?.value == null)) return null
+  const agreePct = pb.agreement != null ? `${Math.round(pb.agreement * 100)}%` : '—'
+  return (
+    <div style={{ marginBottom: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <div className="card-title">🤖 Maker-Checker Pricing</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <strong style={{ fontSize: 20 }}>{fmtMoney(pb.final_value)}</strong>
+        {pb.confidence && <span className={`badge ${CONF_BADGE[pb.confidence?.toUpperCase()] || 'badge-gray'}`}>{pb.confidence} conf</span>}
+        {pb.needs_review
+          ? <span className="badge badge-red" title="The two models disagreed; using the lower estimate.">⚠️ needs review</span>
+          : <span className="badge badge-green">✓ agree</span>}
+        <span className="text-muted" style={{ fontSize: 12 }}>agreement {agreePct}</span>
+      </div>
+      <div className="grid-2" style={{ fontSize: 13 }}>
+        <div>
+          <div className="text-muted">Maker</div>
+          <strong>{fmtMoney(pb.maker?.value)}</strong>
+          <div className="text-muted" style={{ fontSize: 11 }}>{pb.maker?.model || '—'} · {pb.maker?.confidence || '—'}</div>
+        </div>
+        <div>
+          <div className="text-muted">Checker</div>
+          <strong>{fmtMoney(pb.checker?.value)}</strong>
+          <div className="text-muted" style={{ fontSize: 11 }}>{pb.checker?.model || '—'} · {pb.checker?.confidence || '—'}</div>
+        </div>
+      </div>
+      {pb.needs_review && (
+        <div style={{ fontSize: 12, marginTop: 8, color: 'var(--orange)' }}>
+          → Models disagreed by more than the tolerance; using the lower estimate to avoid a false deal.
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Compact at-a-glance Net Flip cell: ⚡score · ROI · net$
+function NetFlipBadge({ score }) {
+  if (!score || score.net_flip_score == null) return <span className="text-muted">—</span>
+  const nf = score.net_flip_score
+  return (
+    <span
+      title={`Net Flip ${nf}/100 · ROI ${fmtPct(score.estimated_roi_percent)} · net ${fmtMoney(score.net_profit)} · risk ${score.risk_level || '—'}`}
+      style={{ cursor: 'help', whiteSpace: 'nowrap' }}
+    >
+      <strong style={{ color: scoreColor(nf), fontSize: 14 }}>⚡{nf}</strong>
+      <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>
+        {fmtPct(score.estimated_roi_percent)}
+      </span>
+    </span>
+  )
+}
+
+// Small inline signal badges (bundle / underpriced) shown under the title.
+function SignalBadges({ listing }) {
+  const score = listing.deal_score
+  const bundle = score?.bundle
+  const bad = score?.bad_listing
+  const showBundle = bundle?.is_bundle
+  const showUnder = bad?.bad_listing_good_item
+  const showModel = listing.detected_model
+  const showLead = score?.is_lead
+  if (!showBundle && !showUnder && !showModel && !showLead) return null
+  return (
+    <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
+      {showLead && (
+        <span className="badge badge-green" title="No fixed price (best offer / $0) — flagged by resale value. Verify the actual price." style={{ fontSize: 10, cursor: 'help' }}>
+          💬 Lead{score.conservative_value != null ? ` ~${fmtMoney(score.conservative_value)}` : ''}
+        </span>
+      )}
+      {showUnder && (
+        <span className="badge badge-orange" title={bad.suggested_reason} style={{ fontSize: 10, cursor: 'help' }}>
+          🔎 Underpriced {bad.undervaluation_score}
+        </span>
+      )}
+      {showBundle && (
+        <span className="badge badge-blue" title={bundle.liquidation_plan} style={{ fontSize: 10, cursor: 'help' }}>
+          🧩 Bundle {fmtMoney(bundle.estimated_bundle_resale_total)}
+        </span>
+      )}
+      {showModel && (
+        <span className="badge badge-gray" title={`Detected from photo: ${listing.detected_brand || ''} ${listing.detected_model}`} style={{ fontSize: 10, cursor: 'help' }}>
+          📷 {listing.detected_model}
+        </span>
+      )}
+    </div>
+  )
 }
 
 function RawModal({ id, onClose }) {
@@ -142,10 +263,15 @@ function ScoreModal({ listing, onClose }) {
   const score = listing.deal_score
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{ maxWidth: 500 }}>
+      <div className="modal" style={{ maxWidth: 500, maxHeight: '85vh', overflowY: 'auto' }}>
         <div className="modal-header">
           <div className="modal-title">Deal Score — {listing.title.slice(0, 40)}</div>
-          <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <Link to={`/pricing-audit?listing=${listing.id}`} className="btn btn-secondary btn-sm" title="Open full pricing trace in the audit tool" style={{ textDecoration: 'none' }}>
+              🔬 Audit
+            </Link>
+            <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+          </div>
         </div>
         {!score ? <div className="text-muted">No score available.</div> : (
           <>
@@ -153,6 +279,7 @@ function ScoreModal({ listing, onClose }) {
               <RatingBadge rating={score.rating} />
               <span style={{ marginLeft: 8, fontSize: 18, fontWeight: 700 }}>{score.score?.toFixed(0)}/100</span>
             </div>
+            <div style={{ marginBottom: 10 }}><ValueSourceBadge score={score} /></div>
             <div className="grid-2" style={{ marginBottom: 12, fontSize: 13 }}>
               <div><div className="text-muted">Est. Value</div><strong>{fmtMoney(score.estimated_value)}</strong></div>
               <div><div className="text-muted">Conservative</div><strong>{fmtMoney(score.conservative_value)}</strong></div>
@@ -170,11 +297,105 @@ function ScoreModal({ listing, onClose }) {
               </div>
             )}
             {score.warnings?.length > 0 && (
-              <div>
+              <div style={{ marginBottom: 12 }}>
                 <div className="card-title">Warnings</div>
                 <ul style={{ listStyle: 'none', padding: 0 }}>
                   {score.warnings.map((w, i) => <li key={i} style={{ fontSize: 13, marginBottom: 4, color: 'var(--yellow)' }}>⚠️ {w}</li>)}
                 </ul>
+              </div>
+            )}
+
+            {/* ── Maker-Checker Pricing ────────────────────────────────── */}
+            <MakerCheckerPanel score={score} />
+
+            {/* ── Net Flip Score ───────────────────────────────────────── */}
+            {score.net_flip_score != null && (
+              <div style={{ marginBottom: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                <div className="card-title">💰 Net Flip Score</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                  <strong style={{ fontSize: 22, color: scoreColor(score.net_flip_score) }}>⚡{score.net_flip_score}</strong>
+                  <span className="text-muted" style={{ fontSize: 12 }}>/ 100</span>
+                  {score.risk_level && <span className={`badge ${RISK_BADGE[score.risk_level] || 'badge-gray'}`}>risk {score.risk_level}</span>}
+                  {score.confidence_label && <span className={`badge ${CONF_BADGE[score.confidence_label] || 'badge-gray'}`}>{score.confidence_label} conf</span>}
+                </div>
+                <div className="grid-2" style={{ fontSize: 13, marginBottom: 8 }}>
+                  <div><div className="text-muted">Est. Resale</div><strong>{fmtMoney(score.net_flip?.estimated_resale_price)}</strong></div>
+                  <div><div className="text-muted">Net Profit</div><strong style={{ color: score.net_profit >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(score.net_profit)}</strong></div>
+                  <div><div className="text-muted">ROI</div><strong>{fmtPct(score.estimated_roi_percent)}</strong></div>
+                  <div><div className="text-muted">Fees</div><strong>{fmtMoney(score.net_flip?.estimated_fees)}</strong></div>
+                  <div><div className="text-muted">Shipping</div><strong>{fmtMoney(score.net_flip?.estimated_shipping_cost)}</strong></div>
+                  <div><div className="text-muted">Repair</div><strong>{fmtMoney(score.net_flip?.estimated_repair_cost)}</strong></div>
+                </div>
+                {score.net_flip?.score_reasons?.length > 0 && (
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                    {score.net_flip.score_reasons.map((r, i) => (
+                      <li key={i} style={{ fontSize: 12, marginBottom: 3, color: 'var(--text-muted)' }}>• {r}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* ── Bad Listing / Undervaluation ─────────────────────────── */}
+            {score.bad_listing?.bad_listing_good_item && (
+              <div style={{ marginBottom: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                <div className="card-title">🔎 Possibly Underpriced ({score.bad_listing.undervaluation_score})</div>
+                {score.bad_listing.suggested_reason && (
+                  <div style={{ fontSize: 13, marginBottom: 6, fontStyle: 'italic' }}>{score.bad_listing.suggested_reason}</div>
+                )}
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {score.bad_listing.detected_signals?.map((s, i) => (
+                    <li key={i} style={{ fontSize: 13, marginBottom: 3, color: 'var(--orange)' }}>→ {s}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* ── Bundle Arbitrage ─────────────────────────────────────── */}
+            {score.bundle?.is_bundle && (
+              <div style={{ marginBottom: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                <div className="card-title">🧩 Bundle — {score.bundle.recommended_strategy}</div>
+                <div className="grid-2" style={{ fontSize: 13, marginBottom: 8 }}>
+                  <div><div className="text-muted">Resale Total</div><strong>{fmtMoney(score.bundle.estimated_bundle_resale_total)}</strong></div>
+                  <div><div className="text-muted">Net if Split</div><strong style={{ color: score.bundle.estimated_bundle_net_profit >= 0 ? 'var(--green)' : 'var(--red)' }}>{fmtMoney(score.bundle.estimated_bundle_net_profit)}</strong></div>
+                </div>
+                {score.bundle.liquidation_plan && (
+                  <div style={{ fontSize: 12, marginBottom: 8, color: 'var(--text-muted)' }}>{score.bundle.liquidation_plan}</div>
+                )}
+                {score.bundle.bundle_items?.length > 0 && (
+                  <table style={{ width: '100%', fontSize: 12 }}>
+                    <tbody>
+                      {score.bundle.bundle_items.map((it, i) => (
+                        <tr key={i}>
+                          <td style={{ padding: '2px 0' }}>{it.item}</td>
+                          <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>{it.confidence}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtMoney(it.estimated_resale_price)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            {/* ── Photo Analysis ───────────────────────────────────────── */}
+            {listing.photo_analysis && (
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                <div className="card-title">📷 Photo Analysis</div>
+                <div style={{ fontSize: 13, marginBottom: 6 }}>
+                  {listing.detected_brand && <span style={{ marginRight: 10 }}><span className="text-muted">Brand:</span> <strong>{listing.detected_brand}</strong></span>}
+                  {listing.detected_model && <span><span className="text-muted">Model:</span> <strong>{listing.detected_model}</strong></span>}
+                </div>
+                {listing.photo_analysis.detected_condition_issues?.length > 0 && (
+                  <div style={{ fontSize: 12, color: 'var(--yellow)', marginBottom: 4 }}>
+                    Issues: {listing.photo_analysis.detected_condition_issues.join(', ')}
+                  </div>
+                )}
+                {listing.photo_analysis.detected_accessories?.length > 0 && (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    Accessories: {listing.photo_analysis.detected_accessories.join(', ')}
+                  </div>
+                )}
               </div>
             )}
           </>
@@ -202,7 +423,7 @@ export default function Listings() {
       ignored: filters.ignored,
       limit: 100,
     }),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
   const { data: watchlists } = useQuery({ queryKey: ['watchlists'], queryFn: getWatchlists })
@@ -321,6 +542,7 @@ export default function Listings() {
                 <th>Source</th>
                 <th>Price</th>
                 <th>Rating</th>
+                <th>Net Flip</th>
                 <th>Cons. Value</th>
                 <th>Target Buy</th>
                 <th>Claude</th>
@@ -339,16 +561,22 @@ export default function Listings() {
                       ? <img src={l.image_url} alt="" className="listing-thumb" />
                       : <div className="listing-thumb-empty">No img</div>}
                   </td>
-                  <td style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {l.url
-                      ? <a href={l.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
-                          {l.title} <ExternalLink size={11} style={{ verticalAlign: 'middle' }} />
-                        </a>
-                      : l.title}
+                  <td style={{ maxWidth: 280 }}>
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {l.url
+                        ? <a href={l.url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+                            {l.title} <ExternalLink size={11} style={{ verticalAlign: 'middle' }} />
+                          </a>
+                        : l.title}
+                    </div>
+                    <SignalBadges listing={l} />
                   </td>
                   <td><span className="badge badge-blue">{l.source}</span></td>
                   <td>{l.price != null ? `$${l.price.toLocaleString()}` : '—'}</td>
                   <td><RatingBadge rating={l.deal_score?.rating} /></td>
+                  <td onClick={() => l.deal_score && setScoreModal(l)} style={{ cursor: l.deal_score?.net_flip_score != null ? 'pointer' : 'default' }}>
+                    <NetFlipBadge score={l.deal_score} />
+                  </td>
                   <td>{fmtMoney(l.deal_score?.conservative_value)}</td>
                   <td>{fmtMoney(l.deal_score?.target_buy_price)}</td>
                   <td onClick={() => l.claude_review && setClaudeModal(l)} style={{ cursor: l.claude_review ? 'pointer' : 'default' }}>
@@ -430,7 +658,7 @@ export default function Listings() {
               ))}
               {!listings?.length && (
                 <tr>
-                  <td colSpan={13}>
+                  <td colSpan={14}>
                     <div className="empty-state">
                       <div className="icon">🔍</div>
                       <div>No listings yet. Run a scraper to start finding deals.</div>

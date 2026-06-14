@@ -1,17 +1,29 @@
 """
-AuctionNinja scraper using Playwright for reliability.
-Falls back to requests+BeautifulSoup if Playwright unavailable.
+AuctionNinja scraper.
+
+AuctionNinja serves server-rendered HTML, so the primary path is a simple
+requests + BeautifulSoup fetch of the marketplace search results page. A
+Playwright fetch of the same URL is kept as a fallback in case requests is
+ever blocked.
+
+The public search form (name="srch_itemsfrm", action="search_mid.php") posts a
+``keyword`` and JS-redirects to ``marketplace-items?keyword=…``. We hit that
+results page directly. Each result is a ``div.iteam-result-box`` wrapping a
+``div.hot-items-box-in`` with a ``.hot-items-title a`` and a ``.hot-items-bottoms p``
+current-bid line; the numeric item id is the trailing ``-<id>.html`` in the URL.
 """
 import asyncio
-import json
 import logging
+import random
 import re
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
-from .base import BaseScraper, NormalizedListing, ScraperHealth
+import requests
+from bs4 import BeautifulSoup
+
+from .base import BaseScraper, NormalizedListing, get_with_retry
 from backend.services.paths import get_screenshots_dir, get_debug_html_dir
 
 logger = logging.getLogger("platapicker.scrapers.auctionninja")
@@ -19,6 +31,11 @@ logger = logging.getLogger("platapicker.scrapers.auctionninja")
 SCREENSHOT_DIR = get_screenshots_dir()
 
 BASE_URL = "https://www.auctionninja.com"
+SEARCH_URL = f"{BASE_URL}/marketplace-items"
+
+# Up to this many result pages per keyword (20 items per page).
+MAX_PAGES = 3
+RESULTS_PER_PAGE = 20
 
 HEADERS = {
     "User-Agent": (
@@ -30,49 +47,12 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# Candidate selectors tried in order — first match wins
-CARD_SELECTORS = [
-    "div.auction-item",
-    "div.lot-card",
-    "div.search-result-item",
-    "article.auction",
-    "[class*='auction-item']",
-    "[class*='lot-card']",
-    "[class*='listing-card']",
-    "div[data-auction-id]",
-    "div[data-lot-id]",
-]
-
-TITLE_SELECTORS = [
-    "h2", "h3", "h4",
-    "[class*='title']",
-    "[class*='name']",
-    "[class*='lot-title']",
-]
-
-PRICE_SELECTORS = [
-    "[class*='price']",
-    "[class*='bid']",
-    "[class*='amount']",
-    "[class*='current']",
-]
-
-LOCATION_SELECTORS = [
-    "[class*='location']",
-    "[class*='city']",
-    "[class*='address']",
-]
-
-TIME_SELECTORS = [
-    "[class*='end']",
-    "[class*='closing']",
-    "[class*='time']",
-    "time",
-    "[class*='date']",
-]
+# Results-grid card. Scoped under .iteam-result-box so we don't pick up the
+# "hot items" sidebar widget, which shares the inner .hot-items-box-in markup.
+CARD_SELECTOR = "div.iteam-result-box div.hot-items-box-in"
 
 
-def _extract_price(text: str) -> Optional[float]:
+def _extract_price(text: Optional[str]) -> Optional[float]:
     if not text:
         return None
     match = re.search(r"\$?([\d,]+\.?\d*)", text.replace(",", ""))
@@ -91,41 +71,163 @@ class AuctionNinjaScraper(BaseScraper):
         super().__init__(config)
         self.request_delay = self.config.get("request_delay_seconds", 2)
         self._last_screenshot: Optional[str] = None
+        self._session = requests.Session()
+        self._session.headers.update(HEADERS)
+
+    # ------------------------------------------------------------------
+    # BaseScraper interface
+    # ------------------------------------------------------------------
 
     def test_connection(self) -> tuple[bool, str]:
         try:
-            result = asyncio.run(self._async_test())
-            return result
-        except Exception as e:
-            return False, f"Test failed: {e}"
-
-    async def _async_test(self) -> tuple[bool, str]:
-        try:
-            from playwright.async_api import async_playwright
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-                page = await browser.new_page()
-                await page.set_extra_http_headers(HEADERS)
-                resp = await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=15_000)
-                status = resp.status if resp else 0
-                await browser.close()
-                if status == 200:
-                    return True, f"AuctionNinja reachable (HTTP {status})"
-                return False, f"AuctionNinja returned HTTP {status}"
+            resp = self._session.get(BASE_URL, timeout=15)
+            if resp.status_code == 200:
+                return True, f"AuctionNinja reachable (HTTP {resp.status_code})"
+            return False, f"AuctionNinja returned HTTP {resp.status_code}"
         except Exception as e:
             return False, f"Connection failed: {e}"
 
     def fetch_raw_listings(self, keyword: str, location: str, radius_miles: int) -> list[dict]:
-        return asyncio.run(self._async_fetch(keyword, location, radius_miles))
+        results: list[dict] = []
+        seen_urls: set = set()
 
-    async def _async_fetch(self, keyword: str, location: str, radius_miles: int) -> list[dict]:
-        raw_listings = []
-        page_obj = None
-        browser = None
-        playwright = None
+        for page in range(1, MAX_PAGES + 1):
+            page_items = self._fetch_page(keyword, page)
 
+            # Page 1 failure → try the Playwright fallback once before giving up.
+            if page_items is None:
+                if page == 1:
+                    logger.info("AuctionNinja: requests fetch failed, trying Playwright fallback")
+                    page_items = self._fetch_page_playwright(keyword, page)
+                if not page_items:
+                    break
+
+            new = 0
+            for item in page_items:
+                key = item.get("url") or item.get("id")
+                if key and key in seen_urls:
+                    continue
+                if key:
+                    seen_urls.add(key)
+                results.append(item)
+                new += 1
+
+            # Stop when a page adds nothing new or returns a short (final) page.
+            if new == 0 or len(page_items) < RESULTS_PER_PAGE:
+                break
+
+            if page < MAX_PAGES:
+                time.sleep(random.uniform(self.request_delay, self.request_delay + 1))
+
+        logger.info(f"AuctionNinja: returning {len(results)} listings for '{keyword}'")
+        return results
+
+    def _fetch_page(self, keyword: str, page: int) -> Optional[list[dict]]:
+        """Fetch one results page via requests. None on failure, list on success."""
+        params = {"keyword": keyword}
+        if page > 1:
+            params["Page"] = page
+        try:
+            resp = get_with_retry(
+                self._session, self._build_url(keyword, page), timeout=20, log=logger
+            )
+            if resp.status_code != 200:
+                logger.warning(f"AuctionNinja: HTTP {resp.status_code} for page {page}")
+                return None
+            soup = BeautifulSoup(resp.text, "html.parser")
+            return self._parse_results(soup, keyword, page)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"AuctionNinja requests fetch failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_url(keyword: str, page: int) -> str:
+        kw = requests.utils.quote(keyword)
+        if page > 1:
+            return f"{SEARCH_URL}?Page={page}&keyword={kw}"
+        return f"{SEARCH_URL}?keyword={kw}"
+
+    def _parse_results(self, soup: BeautifulSoup, keyword: str, page: int) -> list[dict]:
+        cards = soup.select(CARD_SELECTOR)
+        if not cards:
+            logger.warning(
+                f"AuctionNinja: no result cards for '{keyword}' (page {page}) — "
+                "possible layout change or no results"
+            )
+            self._save_debug_html(str(soup)[:500_000], "no_cards")
+            return []
+
+        items: list[dict] = []
+        for card in cards:
+            try:
+                item = self._parse_card(card)
+                if item:
+                    items.append(item)
+            except Exception as e:
+                logger.debug(f"AuctionNinja card parse error: {e}")
+
+        logger.info(f"AuctionNinja: parsed {len(items)} of {len(cards)} cards (page {page})")
+        return items
+
+    def _parse_card(self, card) -> Optional[dict]:
+        anchor = card.select_one(".hot-items-title a") or card.select_one("a[href*='/product/']")
+        if not anchor:
+            return None
+
+        title = anchor.get_text(strip=True)
+        href = anchor.get("href", "")
+        url = href if href.startswith("http") else f"{BASE_URL}/{href.lstrip('/')}"
+
+        if not title:
+            return None
+
+        m = re.search(r"-(\d+)\.html", url)
+        listing_id = m.group(1) if m else None
+
+        price_el = card.select_one(".hot-items-bottoms p") or card.select_one("[id^='CURBIDID']")
+        price = _extract_price(price_el.get_text(strip=True)) if price_el else None
+
+        time_el = card.select_one(".day-left")
+        end_time = time_el.get_text(strip=True) if time_el else None
+
+        img = card.select_one("img")
+        image_url = None
+        if img:
+            image_url = img.get("src") or img.get("data-src")
+
+        return {
+            "id": listing_id,
+            "title": title,
+            "price": price,
+            "url": url,
+            "image_url": image_url,
+            "location": None,
+            "end_time": end_time,
+            "source": "auctionninja",
+        }
+
+    # ------------------------------------------------------------------
+    # Playwright fallback (same URL, only used if requests is blocked)
+    # ------------------------------------------------------------------
+
+    def _fetch_page_playwright(self, keyword: str, page: int) -> Optional[list[dict]]:
+        try:
+            return asyncio.run(self._async_playwright_fetch(keyword, page))
+        except Exception as e:
+            logger.warning(f"AuctionNinja Playwright fallback failed: {e}")
+            return None
+
+    async def _async_playwright_fetch(self, keyword: str, page: int) -> Optional[list[dict]]:
         try:
             from playwright.async_api import async_playwright
+        except ImportError:
+            logger.debug("Playwright not available, skipping AuctionNinja fallback")
+            return None
+
+        url = self._build_url(keyword, page)
+        browser = None
+        playwright = None
+        try:
             playwright = await async_playwright().start()
             browser = await playwright.chromium.launch(
                 headless=True,
@@ -136,178 +238,22 @@ class AuctionNinjaScraper(BaseScraper):
                 viewport={"width": 1280, "height": 900},
             )
             page_obj = await context.new_page()
-            await page_obj.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-
-            search_url = f"{BASE_URL}/search?q={keyword.replace(' ', '+')}"
-            logger.info(f"AuctionNinja: fetching '{keyword}' → {search_url}")
-
-            resp = await page_obj.goto(search_url, wait_until="domcontentloaded", timeout=20_000)
-
+            resp = await page_obj.goto(url, wait_until="domcontentloaded", timeout=20_000)
             if not resp or resp.status >= 400:
-                logger.warning(f"AuctionNinja returned HTTP {resp.status if resp else 'N/A'}")
+                logger.warning(
+                    f"AuctionNinja Playwright: HTTP {resp.status if resp else 'N/A'}"
+                )
                 await self._save_screenshot(page_obj, "http_error")
-                return []
-
+                return None
             await asyncio.sleep(self.request_delay)
-
-            # Try to wait for cards to appear
-            card_sel = await self._find_card_selector(page_obj)
-            if not card_sel:
-                logger.warning("AuctionNinja: no listing card selector matched — possible layout change")
-                await self._save_screenshot(page_obj, "no_cards")
-                html = await page_obj.content()
-                self._save_debug_html(html, "no_cards")
-                return []
-
-            # Scroll to load lazy content
-            for _ in range(3):
-                await page_obj.evaluate("window.scrollBy(0, 600)")
-                await asyncio.sleep(0.5)
-
-            cards = await page_obj.query_selector_all(card_sel)
-            logger.info(f"AuctionNinja: found {len(cards)} cards with selector '{card_sel}'")
-
-            seen_urls: set = set()
-            for card in cards:
-                try:
-                    item = await self._parse_card(page_obj, card)
-                    if item and item.get("url") not in seen_urls:
-                        seen_urls.add(item.get("url"))
-                        raw_listings.append(item)
-                except Exception as e:
-                    logger.debug(f"Card parse error: {e}")
-
-            # Paginate (up to 3 pages)
-            for page_num in range(2, 4):
-                next_btn = await page_obj.query_selector("a[rel='next'], a.pagination-next, [class*='next']")
-                if not next_btn:
-                    break
-                await next_btn.click()
-                await asyncio.sleep(self.request_delay)
-                cards = await page_obj.query_selector_all(card_sel)
-                for card in cards:
-                    try:
-                        item = await self._parse_card(page_obj, card)
-                        if item and item.get("url") not in seen_urls:
-                            seen_urls.add(item.get("url"))
-                            raw_listings.append(item)
-                    except Exception:
-                        pass
-
-        except Exception as e:
-            logger.error(f"AuctionNinja scraper failed: {e}", exc_info=True)
-            if page_obj:
-                await self._save_screenshot(page_obj, "error")
+            html = await page_obj.content()
+            soup = BeautifulSoup(html, "html.parser")
+            return self._parse_results(soup, keyword, page) or None
         finally:
             if browser:
                 await browser.close()
             if playwright:
                 await playwright.stop()
-
-        logger.info(f"AuctionNinja: returning {len(raw_listings)} listings for '{keyword}'")
-        return raw_listings
-
-    async def _find_card_selector(self, page) -> Optional[str]:
-        """Try each known card selector and return the first that finds elements."""
-        for sel in CARD_SELECTORS:
-            try:
-                count = await page.eval_on_selector_all(sel, "els => els.length")
-                if count and count > 0:
-                    logger.debug(f"AuctionNinja card selector matched: '{sel}' ({count} items)")
-                    return sel
-            except Exception:
-                continue
-
-        # Last resort: look for repeated anchor patterns
-        try:
-            links = await page.query_selector_all("a[href*='/auction/'], a[href*='/lot/'], a[href*='/item/']")
-            if links:
-                return "a[href*='/auction/'], a[href*='/lot/'], a[href*='/item/']"
-        except Exception:
-            pass
-
-        return None
-
-    async def _parse_card(self, page, card_el) -> Optional[dict]:
-        """Extract structured data from a single listing card element."""
-        try:
-            # URL
-            href = await card_el.get_attribute("href")
-            if not href:
-                link = await card_el.query_selector("a[href]")
-                href = await link.get_attribute("href") if link else None
-            url = None
-            if href:
-                url = href if href.startswith("http") else f"{BASE_URL}{href}"
-
-            listing_id = None
-            if url:
-                m = re.search(r"/(?:auction|lot|item)/([^/?#]+)", url)
-                listing_id = m.group(1) if m else None
-
-            # Title — try each selector
-            title = None
-            for sel in TITLE_SELECTORS:
-                el = await card_el.query_selector(sel)
-                if el:
-                    t = (await el.inner_text()).strip()
-                    if t and len(t) > 3:
-                        title = t
-                        break
-
-            if not title:
-                # Fall back to any text content
-                title = (await card_el.inner_text()).strip()[:100]
-
-            # Price
-            price = None
-            for sel in PRICE_SELECTORS:
-                el = await card_el.query_selector(sel)
-                if el:
-                    price = _extract_price((await el.inner_text()).strip())
-                    if price is not None:
-                        break
-
-            # Location
-            location = None
-            for sel in LOCATION_SELECTORS:
-                el = await card_el.query_selector(sel)
-                if el:
-                    location = (await el.inner_text()).strip()
-                    if location:
-                        break
-
-            # End time
-            end_time = None
-            for sel in TIME_SELECTORS:
-                el = await card_el.query_selector(sel)
-                if el:
-                    end_time = (await el.inner_text()).strip()
-                    if end_time:
-                        break
-
-            # Image
-            img = await card_el.query_selector("img")
-            image_url = None
-            if img:
-                image_url = await img.get_attribute("src") or await img.get_attribute("data-src")
-
-            if not title:
-                return None
-
-            return {
-                "id": listing_id,
-                "title": title,
-                "price": price,
-                "url": url,
-                "image_url": image_url,
-                "location": location,
-                "end_time": end_time,
-                "source": "auctionninja",
-            }
-        except Exception as e:
-            logger.debug(f"AuctionNinja card parse error: {e}")
-            return None
 
     async def _save_screenshot(self, page, label: str) -> Optional[str]:
         try:
@@ -321,11 +267,16 @@ class AuctionNinjaScraper(BaseScraper):
             return None
 
     def _save_debug_html(self, html: str, label: str):
-        debug_dir = get_debug_html_dir()
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        fpath = debug_dir / f"auctionninja_{label}_{ts}.html"
-        fpath.write_text(html, encoding="utf-8")
-        logger.info(f"Debug HTML saved: {fpath}")
+        try:
+            debug_dir = get_debug_html_dir()
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            fpath = debug_dir / f"auctionninja_{label}_{ts}.html"
+            fpath.write_text(html, encoding="utf-8")
+            logger.info(f"Debug HTML saved: {fpath}")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
 
     def parse_listing(self, raw: dict) -> Optional[NormalizedListing]:
         if not raw.get("title"):

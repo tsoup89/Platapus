@@ -20,7 +20,7 @@ export default function Overview() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['overview'],
     queryFn: getOverview,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
   const { data: webhooks } = useQuery({ queryKey: ['webhooks'], queryFn: getWebhooks })
@@ -28,7 +28,7 @@ export default function Overview() {
   const { data: schedStatus } = useQuery({
     queryKey: ['scheduler-status'],
     queryFn: getSchedulerStatus,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
   })
 
   const runMut = useMutation({
@@ -133,7 +133,7 @@ export default function Overview() {
       <div style={{ marginTop: 16, display: 'flex', gap: 16, alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
         <span>
           <Activity size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-          Refreshes every 30s
+          Refreshes every 60s
         </span>
         {schedStatus && (
           <span>

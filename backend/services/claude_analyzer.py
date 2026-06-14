@@ -62,6 +62,11 @@ def _fetch_image_b64(url: str) -> Optional[tuple[str, str]]:
         content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
         if not content_type.startswith("image/"):
             content_type = "image/jpeg"
+        if len(resp.content) > 5 * 1024 * 1024:
+            logger.warning(
+                f"Image too large ({len(resp.content) // 1024} KB), skipping: {url}"
+            )
+            return None
         b64 = base64.standard_b64encode(resp.content).decode("utf-8")
         return b64, content_type
     except Exception as e:
@@ -136,6 +141,8 @@ def review_listing(
             messages=[{"role": "user", "content": content}],
         )
 
+        if not response.content:
+            raise ValueError("Claude returned an empty response")
         raw_text = response.content[0].text.strip()
 
         # Strip accidental markdown code fences
@@ -229,6 +236,8 @@ def analyze_photo(
         }],
     )
 
+    if not response.content:
+        raise ValueError("Claude returned an empty response")
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[-1]

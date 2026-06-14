@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Package, Plus, X, Upload, Trash2,
   Zap, ExternalLink, RefreshCw, TrendingUp, DollarSign,
-  ShoppingBag, CheckCircle, AlertCircle, Clock, Link, Camera, Sparkles,
+  ShoppingBag, CheckCircle, AlertCircle, Clock, Link, Sparkles,
 } from 'lucide-react'
 import {
   getInventory, createInventoryItem, getInventoryItem,
@@ -12,8 +12,33 @@ import {
   triggerPriceSuggestion,
   getSellListings, createSellListing, updateSellListing,
   markSellListingSold, removeSellListing,
-  analyzePhoto,
 } from '../api'
+
+const CLAUDE_INVENTORY_PROMPT = `You are analyzing an item someone wants to sell on Facebook Marketplace or eBay.
+Return ONLY a JSON object — no markdown fences, no prose. Use this exact schema:
+{
+  "title": "concise listing title including brand/model if visible (e.g. 'Nintendo GameCube Console Purple')",
+  "category": "single-word or short category (e.g. gaming, electronics, furniture, clothing, tools, appliances)",
+  "condition": "exactly one of: NEW, LIKE_NEW, GOOD, FAIR, POOR",
+  "description": "2-3 sentence listing description mentioning key features and any visible wear or issues"
+}`
+
+async function openInventoryInClaude() {
+  const msg = `Upload a photo of your item along with this prompt:\n\n${CLAUDE_INVENTORY_PROMPT}`
+  try {
+    if (window.platapicker?.copyToClipboard) {
+      await window.platapicker.copyToClipboard(msg)
+    } else {
+      await navigator.clipboard.writeText(msg)
+    }
+  } catch (_) {}
+  const url = 'https://claude.ai/new'
+  if (window.platapicker?.openExternal) {
+    window.platapicker.openExternal(url)
+  } else {
+    window.open(url, '_blank')
+  }
+}
 
 const CONDITIONS = [
   { value: 'NEW', label: 'New' },
@@ -146,9 +171,9 @@ function CreateItemDrawer({ onClose, onCreated }) {
     condition: 'GOOD', purchase_price: '', notes: '', status: 'DRAFT',
   })
   const [error, setError] = useState(null)
-  const [analyzing, setAnalyzing] = useState(false)
-  const [analyzeError, setAnalyzeError] = useState(null)
-  const photoRef = useRef()
+  const [jsonPaste, setJsonPaste] = useState('')
+  const [jsonError, setJsonError] = useState(null)
+  const [copied, setCopied] = useState(false)
 
   const mut = useMutation({
     mutationFn: () => createInventoryItem({
@@ -160,25 +185,30 @@ function CreateItemDrawer({ onClose, onCreated }) {
     onError: (e) => setError(e?.response?.data?.detail || e.message),
   })
 
-  async function handlePhotoFill(e) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setAnalyzing(true)
-    setAnalyzeError(null)
+  async function handleOpenClaude() {
+    await openInventoryInClaude()
+    setCopied(true)
+    setTimeout(() => setCopied(false), 3000)
+  }
+
+  function handleApplyJson() {
+    setJsonError(null)
     try {
-      const result = await analyzePhoto(file, 'inventory')
+      let raw = jsonPaste.trim()
+      if (raw.startsWith('```')) {
+        raw = raw.split('\n').slice(1).join('\n').replace(/```$/, '').trim()
+      }
+      const data = JSON.parse(raw)
       setForm(f => ({
         ...f,
-        title: result.title || f.title,
-        category: result.category || f.category,
-        condition: result.condition || f.condition,
-        description: result.description || f.description,
+        title: data.title || f.title,
+        category: data.category || f.category,
+        condition: data.condition || f.condition,
+        description: data.description || f.description,
       }))
-    } catch (err) {
-      setAnalyzeError(err?.response?.data?.detail || 'Photo analysis failed. Check your Claude API key in Settings.')
-    } finally {
-      setAnalyzing(false)
-      e.target.value = ''
+      setJsonPaste('')
+    } catch {
+      setJsonError('Could not parse JSON — make sure you copied the full response from Claude.')
     }
   }
 
@@ -196,27 +226,35 @@ function CreateItemDrawer({ onClose, onCreated }) {
           <div className="claude-assistant" style={{ marginBottom: 16 }}>
             <div className="claude-assistant-header">
               <Sparkles size={14} style={{ color: 'var(--accent)' }} />
-              <span>Fill with Photo</span>
+              <span>Fill with Claude</span>
             </div>
-            {analyzeError && <div className="claude-error" style={{ marginBottom: 8 }}>{analyzeError}</div>}
-            <input
-              ref={photoRef}
-              type="file"
-              accept="image/*"
-              style={{ display: 'none' }}
-              onChange={handlePhotoFill}
-            />
             <button
               type="button"
               className="btn btn-accent btn-sm"
-              onClick={() => photoRef.current?.click()}
-              disabled={analyzing}
-              style={{ width: '100%' }}
+              onClick={handleOpenClaude}
+              style={{ width: '100%', marginBottom: 8 }}
             >
-              {analyzing
-                ? <><RefreshCw size={13} className="spin" /> Analyzing…</>
-                : <><Camera size={13} /> Upload photo — Claude fills the form</>}
+              {copied
+                ? <><RefreshCw size={13} /> Prompt copied! Paste it in Claude with your photo</>
+                : <><ExternalLink size={13} /> Copy prompt &amp; open Claude →</>}
             </button>
+            <textarea
+              value={jsonPaste}
+              onChange={e => { setJsonPaste(e.target.value); setJsonError(null) }}
+              placeholder="Paste Claude's JSON response here…"
+              style={{ width: '100%', minHeight: 70, fontFamily: 'monospace', fontSize: 11, boxSizing: 'border-box' }}
+            />
+            {jsonError && <div className="claude-error" style={{ marginBottom: 4 }}>{jsonError}</div>}
+            {jsonPaste.trim() && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleApplyJson}
+                style={{ width: '100%', marginTop: 4 }}
+              >
+                Apply to form
+              </button>
+            )}
           </div>
 
           <div className="form-section">

@@ -16,7 +16,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper, NormalizedListing, ScraperHealth
+from .base import BaseScraper, NormalizedListing, ScraperHealth, extract_price, get_with_retry
 
 logger = logging.getLogger("platapicker.scrapers.ebay")
 
@@ -44,18 +44,8 @@ HEADERS = {
 }
 
 
-def _extract_price(text) -> Optional[float]:
-    if text is None:
-        return None
-    s = str(text).replace(",", "").replace("$", "").strip()
-    # Handle price ranges like "$10.00 to $50.00" — take the lower
-    m = re.search(r"([\d]+\.?\d*)", s)
-    if m:
-        try:
-            return float(m.group(1))
-        except ValueError:
-            pass
-    return None
+# Price ranges like "$10.00 to $50.00" yield the first (lower) amount.
+_extract_price = extract_price
 
 
 class EbayScraper(BaseScraper):
@@ -159,7 +149,7 @@ class EbayScraper(BaseScraper):
         try:
             self._session.headers["Referer"] = "https://www.ebay.com/"
             self._session.headers["Sec-Fetch-Site"] = "same-origin"
-            resp = self._session.get(url, timeout=15)
+            resp = get_with_retry(self._session, url, timeout=15, log=logger)
             if resp.status_code == 200:
                 return self._parse_html(resp.text)
             logger.warning(f"eBay: HTTP {resp.status_code} for '{keyword}' page {page}")

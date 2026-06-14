@@ -63,6 +63,8 @@ def score_listing(
     thresholds: Optional[dict] = None,
     platform_fee_pct: float = 0.13,
     target_profit_margin: float = 0.30,
+    shipping_cost: float = 0.0,
+    tax_rate: float = 0.0,
 ) -> DealResult:
     result = DealResult()
     thresholds = thresholds or DEAL_THRESHOLDS
@@ -106,18 +108,34 @@ def score_listing(
         result.estimated_value = estimated_value
         result.conservative_value = conservative_value
 
-        sell_price_estimate = conservative_value * (1 - platform_fee_pct)
-        result.target_buy_price = sell_price_estimate * (1 - target_profit_margin)
+        # All-in buy cost including any sales tax
+        tax_amount = round(price * tax_rate, 2)
+        effective_buy = price + tax_amount
 
-        ratio = price / conservative_value
+        # Net sell revenue after platform fee and outbound shipping
+        # Clamp to 0 — shipping can't exceed what you'd net from the sale
+        net_sell = max(conservative_value * (1 - platform_fee_pct) - shipping_cost, 0)
+        result.target_buy_price = net_sell * (1 - target_profit_margin) if net_sell > 0 else None
+
+        # Rating is based on effective buy cost vs. conservative value
+        ratio = effective_buy / conservative_value
         pct = int(ratio * 100)
-        result.reasons.append(f"Price is {pct}% of conservative value (${conservative_value:,.0f})")
+        cost_note = f"${effective_buy:,.0f} all-in" if (tax_amount or shipping_cost) else f"${price:,.0f}"
+        detail_parts = []
+        if tax_amount:
+            detail_parts.append(f"tax ${tax_amount:,.0f}")
+        if shipping_cost:
+            detail_parts.append(f"shipping ${shipping_cost:,.0f}")
+        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        result.reasons.append(
+            f"{cost_note} is {pct}% of conservative value (${conservative_value:,.0f}){detail}"
+        )
 
-        result.estimated_profit = sell_price_estimate - price
-        if sell_price_estimate > 0:
-            result.profit_margin = result.estimated_profit / sell_price_estimate
+        result.estimated_profit = net_sell - effective_buy
+        if net_sell > 0:
+            result.profit_margin = result.estimated_profit / net_sell
 
-        result.rating = _rating_from_ratio(price, conservative_value, thresholds)
+        result.rating = _rating_from_ratio(effective_buy, conservative_value, thresholds)
 
         # Score 0-100
         score_ratio = max(0, 1 - ratio)

@@ -11,11 +11,12 @@ class WatchlistCreate(BaseModel):
     category: Optional[str] = None
     keywords: list[str] = []
     negative_keywords: list[str] = []
+    required_keywords: list[str] = []
     brands: list[str] = []
     aliases: list[Any] = []
     locations: list[str] = []
     radius_miles: int = 50
-    min_price: float = 0
+    min_price: float = 1
     max_price: float = 99999
     sources_enabled: list[str] = []
     run_frequency_minutes: int = 60
@@ -24,6 +25,9 @@ class WatchlistCreate(BaseModel):
     min_profit_dollars: float = 50
     discord_webhook_id: Optional[int] = None
     notes: str = ""
+    # ── Scoring adjustments ─────────────────────────────────────
+    estimated_shipping_cost: float = 0.0
+    sales_tax_rate: float = 0.0
     # ── Automation ──────────────────────────────────────────────
     auto_outreach_enabled: bool = False
     outreach_message_template: str = ""
@@ -41,6 +45,7 @@ class WatchlistOut(BaseModel):
     category: Optional[str]
     keywords: list[str]
     negative_keywords: list[str]
+    required_keywords: list[str]
     brands: list[str]
     aliases: list[Any]
     locations: list[str]
@@ -54,6 +59,9 @@ class WatchlistOut(BaseModel):
     min_profit_dollars: float
     discord_webhook_id: Optional[int]
     notes: str
+    # ── Scoring adjustments ─────────────────────────────────────
+    estimated_shipping_cost: float
+    sales_tax_rate: float
     # ── Automation ──────────────────────────────────────────────
     auto_outreach_enabled: bool
     outreach_message_template: str
@@ -72,6 +80,7 @@ class WatchlistOut(BaseModel):
             category=obj.category,
             keywords=obj.keywords,
             negative_keywords=obj.negative_keywords,
+            required_keywords=obj.required_keywords,
             brands=obj.brands,
             aliases=obj.aliases,
             locations=obj.locations,
@@ -85,6 +94,8 @@ class WatchlistOut(BaseModel):
             min_profit_dollars=obj.min_profit_dollars,
             discord_webhook_id=obj.discord_webhook_id,
             notes=obj.notes or "",
+            estimated_shipping_cost=obj.estimated_shipping_cost or 0.0,
+            sales_tax_rate=obj.sales_tax_rate or 0.0,
             auto_outreach_enabled=obj.auto_outreach_enabled or False,
             outreach_message_template=obj.outreach_message_template or "",
             auto_list_on_buy=obj.auto_list_on_buy or False,
@@ -155,6 +166,19 @@ class DealScoreOut(BaseModel):
     confidence: float
     reasons: list[str]
     warnings: list[str]
+    # Net Flip Score + new signal detail (added 2026-06-01)
+    net_flip_score: Optional[float] = None
+    estimated_roi_percent: Optional[float] = None
+    net_profit: Optional[float] = None
+    risk_level: Optional[str] = None
+    confidence_label: Optional[str] = None
+    net_flip: Optional[dict] = None
+    bad_listing: Optional[dict] = None
+    bundle: Optional[dict] = None
+    # How the value was derived + maker-checker breakdown (added 2026-06-14)
+    value_source: Optional[str] = None
+    pricing_breakdown: Optional[dict] = None
+    is_lead: Optional[bool] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -174,6 +198,17 @@ class DealScoreOut(BaseModel):
             confidence=obj.confidence,
             reasons=obj.reasons,
             warnings=obj.warnings,
+            net_flip_score=obj.net_flip_score,
+            estimated_roi_percent=obj.estimated_roi_percent,
+            net_profit=obj.net_profit,
+            risk_level=obj.risk_level,
+            confidence_label=obj.confidence_label,
+            net_flip=obj.net_flip,
+            bad_listing=obj.bad_listing,
+            bundle=obj.bundle,
+            value_source=getattr(obj, "value_source", None),
+            pricing_breakdown=getattr(obj, "pricing_breakdown", None),
+            is_lead=getattr(obj, "is_lead", None),
             created_at=obj.created_at,
         )
 
@@ -230,6 +265,9 @@ class ListingOut(BaseModel):
     alert_sent_at: Optional[datetime]
     outreach_status: Optional[str]
     outreach_sent_at: Optional[datetime]
+    detected_brand: Optional[str] = None
+    detected_model: Optional[str] = None
+    photo_analysis: Optional[dict] = None
     deal_score: Optional[DealScoreOut]
     claude_review: Optional[ClaudeReviewOut]
 
@@ -257,6 +295,9 @@ class ListingOut(BaseModel):
             alert_sent_at=obj.alert_sent_at,
             outreach_status=obj.outreach_status,
             outreach_sent_at=obj.outreach_sent_at,
+            detected_brand=obj.detected_brand,
+            detected_model=obj.detected_model,
+            photo_analysis=obj.photo_analysis,
             deal_score=DealScoreOut.from_orm_safe(obj.deal_score) if obj.deal_score else None,
             claude_review=ClaudeReviewOut.from_orm_safe(obj.claude_review) if obj.claude_review else None,
         )

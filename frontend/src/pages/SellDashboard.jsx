@@ -69,7 +69,7 @@ export default function SellDashboard() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['sell-dashboard'],
     queryFn: getSellDashboard,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
   const removeMut = useMutation({

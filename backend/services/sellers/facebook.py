@@ -115,7 +115,19 @@ async def _run_listing(draft: ListingDraft) -> ListingResult:
                     )
                     await _human_delay(2, 4)
                 except Exception as e:
-                    logger.warning(f"FB seller: photo upload failed (non-fatal): {e}")
+                    # Marketplace requires at least one photo, so continuing
+                    # would only fail later at Publish with a confusing error.
+                    logger.error(f"FB seller: photo upload failed: {e}")
+                    screenshot_path = await _screenshot(page, "photo_upload_failed")
+                    return ListingResult(
+                        success=False,
+                        action_url=FB_CREATE_URL,
+                        screenshot_path=screenshot_path,
+                        error_message=(
+                            "Photo upload failed — Facebook Marketplace requires "
+                            "at least one photo. Complete the listing manually."
+                        ),
+                    )
 
             # ── Title ─────────────────────────────────────────────────────
             logger.info("FB seller: filling title")
@@ -166,7 +178,9 @@ async def _run_listing(draft: ListingDraft) -> ListingResult:
                     await el.wait_for(timeout=4_000)
                     await el.click()
                     await _human_delay()
-                    await el.fill(str(int(draft.price)))
+                    # Keep cents — int() would silently turn $29.99 into $29
+                    price_str = f"{draft.price:.2f}".rstrip("0").rstrip(".")
+                    await el.fill(price_str)
                     await _human_delay()
                     break
                 except Exception:

@@ -24,7 +24,7 @@ function SchedulerSection() {
   const { data: status } = useQuery({
     queryKey: ['scheduler-status'],
     queryFn: getSchedulerStatus,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
   })
 
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: getSettings })
@@ -153,7 +153,7 @@ function FacebookSection() {
   const { data: fbStatus } = useQuery({
     queryKey: ['fb-session'],
     queryFn: getFBSessionStatus,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
   const debugMut = useMutation({

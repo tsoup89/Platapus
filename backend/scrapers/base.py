@@ -4,8 +4,77 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 import logging
+import random
+import re
+import time
+
+import requests
 
 logger = logging.getLogger("platapicker.scrapers")
+
+
+def extract_price(val) -> Optional[float]:
+    """Parse a price out of marketplace text (or pass a number through).
+
+    Handles "$1,234.56", "1200", "$10.00 to $50.00" (returns the first/lower
+    amount), int/float passthrough, and returns None when no number is found.
+    Shared by all scrapers so price parsing behaves identically everywhere.
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace(",", "").replace("$", "").strip()
+    m = re.search(r"\d+(?:\.\d+)?", s)
+    if m:
+        try:
+            return float(m.group())
+        except ValueError:
+            pass
+    return None
+
+
+def get_with_retry(
+    session: requests.Session,
+    url: str,
+    *,
+    timeout: float = 15,
+    max_attempts: int = 3,
+    backoff_base: float = 2.0,
+    log: Optional[logging.Logger] = None,
+) -> requests.Response:
+    """GET with exponential backoff on transient failures.
+
+    Retries timeouts, connection errors, and HTTP 429/5xx with jittered
+    exponential backoff. Other statuses (404, 403, etc.) are returned
+    immediately for the caller to handle — they won't change on retry.
+
+    Returns the final Response (which may still carry an error status after
+    retries are exhausted). Raises the last network exception if every
+    attempt failed before getting a response.
+    """
+    log = log or logger
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = session.get(url, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            reason = f"{type(e).__name__}: {e}"
+        else:
+            if resp.status_code != 429 and resp.status_code < 500:
+                return resp
+            if attempt == max_attempts:
+                return resp
+            reason = f"HTTP {resp.status_code}"
+        if attempt < max_attempts:
+            delay = backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            log.warning(
+                f"Transient failure ({reason}) for {url} — "
+                f"retrying in {delay:.1f}s (attempt {attempt}/{max_attempts})"
+            )
+            time.sleep(delay)
+    raise last_exc
 
 
 @dataclass

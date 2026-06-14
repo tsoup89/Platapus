@@ -10,6 +10,7 @@ from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 from backend.models.database import SessionLocal
 from backend.models.models import Watchlist, Source, AppSetting, ScraperRun
@@ -75,6 +76,48 @@ def _heartbeat_job():
         db.close()
 
 
+def _weekly_review_job():
+    """Generate and post the weekly review to Discord."""
+    try:
+        from backend.services.weekly_review import run_weekly_review
+        result = run_weekly_review()
+        logger.info("Weekly review job: posted=%s", result.get("posted"))
+    except Exception as e:
+        logger.error("Weekly review job failed: %s", e, exc_info=True)
+
+
+def _register_weekly_review(db):
+    """Add (or refresh) the weekly-review cron job per current settings. Removes the
+    job when disabled. Cron fires in the configured local timezone."""
+    if not _scheduler:
+        return
+    enabled = bool(get_setting(db, "weekly_review_enabled"))
+    if not enabled:
+        if _scheduler.get_job("weekly_review"):
+            _scheduler.remove_job("weekly_review")
+        return
+
+    day = get_setting(db, "weekly_review_day_of_week") or "mon"
+    hour = int(get_setting(db, "weekly_review_hour") or 8)
+    tzname = get_setting(db, "weekly_review_timezone") or "America/New_York"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tzname)
+    except Exception:
+        tz = None  # fall back to scheduler default (UTC)
+
+    _scheduler.add_job(
+        _weekly_review_job,
+        trigger=CronTrigger(day_of_week=day, hour=hour, minute=0, timezone=tz),
+        id="weekly_review",
+        name="Weekly review digest",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("Weekly review scheduled: %s %02d:00 %s", day, hour, tzname)
+
+
 def _get_min_interval(db) -> int:
     """
     Return the polling interval in minutes — the minimum of all enabled watchlist
@@ -126,7 +169,8 @@ def _watchdog_check(db):
     if not get_setting(db, "watchdog_enabled"):
         return
 
-    multiplier = get_setting(db, "watchdog_grace_multiplier") or 2
+    # Clamp so a typo'd setting can't silently disable the watchdog
+    multiplier = max(1, min(get_setting(db, "watchdog_grace_multiplier") or 2, 10))
     now = datetime.utcnow()
     watchlists = db.query(Watchlist).filter(Watchlist.enabled == True).all()
 
@@ -270,6 +314,12 @@ def start_scheduler():
         coalesce=True,
     )
 
+    db = SessionLocal()
+    try:
+        _register_weekly_review(db)
+    finally:
+        db.close()
+
     _scheduler.start()
     logger.info(
         f"Scheduler started — polling every {poll_interval} minutes "
@@ -305,6 +355,12 @@ def apply_settings():
         stop_scheduler()
     elif enabled and running:
         reschedule(poll_interval)
+        # Pick up any weekly-review setting changes live.
+        db = SessionLocal()
+        try:
+            _register_weekly_review(db)
+        finally:
+            db.close()
 
 
 def get_scheduler_status() -> dict:

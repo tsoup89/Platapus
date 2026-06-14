@@ -27,6 +27,30 @@ DEFAULTS = {
         "FAIR": 0.75,
     },
     "alert_batch_threshold": 3,
+    # Photo analysis (OCR / model recognition). Opt-in — costs Claude tokens.
+    "photo_analysis_enabled": False,
+    # Local-LLM (Ollama) maker-checker pricing knobs (writable + visible in Settings).
+    "local_llm_pricing_enabled": True,
+    "local_llm_base_url": "http://localhost:11434",
+    "local_llm_model": "qwen3:30b",
+    "local_llm_checker_enabled": True,
+    "local_llm_checker_model": "qwen3-coder:30b",
+    "local_llm_agreement_tolerance": 0.25,
+    "local_llm_timeout_seconds": 60,
+    # Weekly review — once-a-week health + deal-flow digest posted to Discord.
+    "weekly_review_enabled": True,
+    "weekly_review_discord_webhook_id": None,
+    "weekly_review_day_of_week": "mon",   # APScheduler cron day_of_week
+    "weekly_review_hour": 8,              # local hour (see timezone below)
+    "weekly_review_timezone": "America/New_York",
+}
+
+# Keys writable via the generic POST /settings endpoint. Keys with dedicated
+# endpoints (pipeline_queue, expo_push_token) are deliberately excluded.
+ALLOWED_KEYS = set(DEFAULTS) | {
+    "claude_enabled",
+    "claude_api_key",
+    "claude_model",
 }
 
 

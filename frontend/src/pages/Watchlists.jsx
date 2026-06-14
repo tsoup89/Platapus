@@ -13,13 +13,16 @@ Return ONLY a valid JSON object — no explanation, no markdown, no code fences.
 
 {
   "name": "short watchlist name (2-4 words)",
-  "keywords": ["8 to 15 search terms that appear in actual resale listings — mix broad terms, brand+model combos, size/spec variants"],
+  "keywords": ["exactly 5 search terms, ordered best-first — ONLY the first 5 are actually searched, so make each one a query a seller's listing would match (brand+model combos beat broad terms)"],
   "brands": ["top 5-10 brands worth tracking in this category"],
-  "negative_keywords": ["10-15 terms to exclude — broken, cracked, parts only, for parts, damaged, commercial grade, etc. plus category-specific junk"],
+  "required_keywords": ["3-10 terms — a listing is DISCARDED unless its title/description contains at least one. Use this to lock in the specific subtype/brand/team the user asked for (e.g. 'propane' for gas grills, team names for sports gear). Leave empty [] only if the user truly wants everything in the category"],
+  "negative_keywords": ["12-20 terms to exclude. Cover three buckets: (1) condition junk — broken, cracked, parts only, for parts, as is, as-is, untested, needs repair, repair, not working, doesn't work; (2) wrong subtypes the user did NOT ask for (e.g. charcoal/pellet/electric if they want propane); (3) off-brand/third-party accessory makers if the user wants OEM only"],
   "min_price": <realistic minimum price for a legit used unit, as integer>,
   "max_price": <realistic maximum price, or 99999 if highly variable, as integer>,
   "notes": "1-2 sentences on what makes a good deal and what red flags to watch for"
-}`
+}
+
+Pay close attention to qualifiers in my description ("only", "just", "working", specific brands/teams/fuel types) — encode them as required_keywords and negative_keywords, not just as search keywords.`
 }
 
 async function openInClaude(description) {
@@ -50,11 +53,12 @@ const SOURCE_LABELS = {
 
 const EMPTY_FORM = {
   name: '', enabled: true, category: '',
-  keywords: [], negative_keywords: [], brands: [], aliases: [],
-  locations: [], radius_miles: 50,
+  keywords: [], negative_keywords: [], required_keywords: [], brands: [], aliases: [],
+  locations: ['10706'], radius_miles: 50,
   min_price: 0, max_price: 99999,
   sources_enabled: [], run_frequency_minutes: 60,
   min_rating_to_alert: 'GOOD', min_profit_margin: 0.20, min_profit_dollars: 50,
+  estimated_shipping_cost: 0, sales_tax_rate: 0,
   discord_webhook_id: null, notes: '',
   auto_outreach_enabled: false,
   outreach_message_template: '',
@@ -97,6 +101,7 @@ function ClaudeAssistant({ onApply }) {
         name: data.name || '',
         keywords: Array.isArray(data.keywords) ? data.keywords : [],
         brands: Array.isArray(data.brands) ? data.brands : [],
+        required_keywords: Array.isArray(data.required_keywords) ? data.required_keywords : [],
         negative_keywords: Array.isArray(data.negative_keywords) ? data.negative_keywords : [],
         min_price: typeof data.min_price === 'number' ? data.min_price : 0,
         max_price: typeof data.max_price === 'number' ? data.max_price : 99999,
@@ -118,10 +123,17 @@ function ClaudeAssistant({ onApply }) {
     setPhotoError(null)
     try {
       const data = await analyzePhoto(file, 'watchlist')
+      const usable = data && typeof data === 'object'
+        && (data.name || (Array.isArray(data.keywords) && data.keywords.length))
+      if (!usable) {
+        setPhotoError('Claude could not extract anything useful from that photo — try a clearer shot.')
+        return
+      }
       onApply({
         name: data.name || '',
         keywords: Array.isArray(data.keywords) ? data.keywords : [],
         brands: Array.isArray(data.brands) ? data.brands : [],
+        required_keywords: Array.isArray(data.required_keywords) ? data.required_keywords : [],
         negative_keywords: Array.isArray(data.negative_keywords) ? data.negative_keywords : [],
         min_price: typeof data.min_price === 'number' ? data.min_price : 0,
         max_price: typeof data.max_price === 'number' ? data.max_price : 99999,
@@ -355,6 +367,7 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
       name: data.name || f.name,
       keywords: data.keywords?.length ? data.keywords : f.keywords,
       brands: data.brands?.length ? data.brands : f.brands,
+      required_keywords: data.required_keywords?.length ? data.required_keywords : f.required_keywords,
       negative_keywords: data.negative_keywords?.length ? data.negative_keywords : f.negative_keywords,
       min_price: data.min_price ?? f.min_price,
       max_price: data.max_price ?? f.max_price,
@@ -446,6 +459,17 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
                   value={Array.isArray(form.keywords) ? form.keywords : []}
                   onChange={v => set('keywords', v)}
                   placeholder="Type a keyword and press Enter…"
+                />
+              </div>
+              <div className="form-group">
+                <label>
+                  Must Include
+                  <span className="label-hint">listing kept only if title/description has one of these</span>
+                </label>
+                <ChipInput
+                  value={Array.isArray(form.required_keywords) ? form.required_keywords : []}
+                  onChange={v => set('required_keywords', v)}
+                  placeholder="Miami, Redhawks, MU…"
                 />
               </div>
               <div className="form-group">
@@ -554,6 +578,37 @@ function WatchlistDrawer({ initial, webhooks, onClose, onSave }) {
                     style={{ width: 70 }}
                   />
                   <span className="text-muted" style={{ fontSize: 12 }}>min</span>
+                </div>
+              </div>
+            </div>
+
+            {/* SCORING */}
+            <div className="form-section">
+              <div className="form-section-title">Scoring</div>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label>Shipping cost (sell-side)</label>
+                  <input
+                    type="number" step="0.01" min={0}
+                    value={form.estimated_shipping_cost}
+                    onChange={e => set('estimated_shipping_cost', +e.target.value)}
+                    placeholder="0.00"
+                  />
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    What you pay to ship to buyers (e.g. $12 for eBay, $0 for local pickup).
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>Sales tax rate (buy-side)</label>
+                  <input
+                    type="number" step="0.001" min={0} max={0.2}
+                    value={form.sales_tax_rate}
+                    onChange={e => set('sales_tax_rate', +e.target.value)}
+                    placeholder="0.00"
+                  />
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Tax on your purchase (e.g. 0.08 for 8%). Leave 0 for local cash buys.
+                  </div>
                 </div>
               </div>
             </div>

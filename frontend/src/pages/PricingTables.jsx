@@ -52,7 +52,7 @@ export default function PricingTables() {
   const { data: syncStatus } = useQuery({
     queryKey: ['gc-sync-status'],
     queryFn: getSyncStatus,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   })
 
   const { data: prices, isLoading } = useQuery({

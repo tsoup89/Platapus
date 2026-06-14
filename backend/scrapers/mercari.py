@@ -14,7 +14,7 @@ import urllib.parse
 from datetime import datetime
 from typing import Optional
 
-from .base import BaseScraper, NormalizedListing, ScraperHealth
+from .base import BaseScraper, NormalizedListing, ScraperHealth, extract_price
 from backend.services.paths import get_screenshots_dir, get_browser_sessions_dir
 
 logger = logging.getLogger("platapicker.scrapers.mercari")
@@ -52,19 +52,7 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
 SORT_BY = 3
 
 
-def _extract_price(val) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    text = str(val).replace(",", "").replace("$", "").strip()
-    m = re.search(r"[\d]+\.?\d*", text)
-    if m:
-        try:
-            return float(m.group())
-        except ValueError:
-            pass
-    return None
+_extract_price = extract_price
 
 
 class MercariScraper(BaseScraper):

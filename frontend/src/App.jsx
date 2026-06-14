@@ -1,17 +1,19 @@
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import {
   Activity, List, Database, Settings, Radio, ShoppingBag,
-  Package, Store, TrendingUp,
+  Package, Store, TrendingUp, Microscope,
 } from 'lucide-react'
 import Overview from './pages/Overview'
 import ScraperHealth from './pages/ScraperHealth'
 import Watchlists from './pages/Watchlists'
 import Listings from './pages/Listings'
 import PricingTables from './pages/PricingTables'
+import PricingAudit from './pages/PricingAudit'
 import SettingsPage from './pages/SettingsPage'
 import Inventory from './pages/Inventory'
 import SellDashboard from './pages/SellDashboard'
 import ProfitTracker from './pages/ProfitTracker'
+import ErrorBoundary from './ErrorBoundary'
 import './App.css'
 
 const NAV = [
@@ -21,6 +23,7 @@ const NAV = [
   { to: '/watchlists', icon: List, label: 'Watchlists' },
   { to: '/listings', icon: ShoppingBag, label: 'Listings' },
   { to: '/pricing', icon: Database, label: 'Pricing Tables' },
+  { to: '/pricing-audit', icon: Microscope, label: 'Pricing Audit' },
   { kind: 'section', label: 'Sell' },
   { to: '/inventory', icon: Package, label: 'Inventory', sell: true },
   { to: '/sell-dashboard', icon: Store, label: 'Sell Dashboard', sell: true },
@@ -30,6 +33,7 @@ const NAV = [
 ]
 
 export default function App() {
+  const location = useLocation()
   return (
     <div className="app-shell">
       <nav className="sidebar">
@@ -83,17 +87,20 @@ export default function App() {
         <div className="sidebar-footer">v1.0.0</div>
       </nav>
       <main className="content">
-        <Routes>
-          <Route path="/" element={<Overview />} />
-          <Route path="/health" element={<ScraperHealth />} />
-          <Route path="/watchlists" element={<Watchlists />} />
-          <Route path="/listings" element={<Listings />} />
-          <Route path="/pricing" element={<PricingTables />} />
-          <Route path="/inventory" element={<Inventory />} />
-          <Route path="/sell-dashboard" element={<SellDashboard />} />
-          <Route path="/profit" element={<ProfitTracker />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
+        <ErrorBoundary key={location.pathname}>
+          <Routes>
+            <Route path="/" element={<Overview />} />
+            <Route path="/health" element={<ScraperHealth />} />
+            <Route path="/watchlists" element={<Watchlists />} />
+            <Route path="/listings" element={<Listings />} />
+            <Route path="/pricing" element={<PricingTables />} />
+            <Route path="/pricing-audit" element={<PricingAudit />} />
+            <Route path="/inventory" element={<Inventory />} />
+            <Route path="/sell-dashboard" element={<SellDashboard />} />
+            <Route path="/profit" element={<ProfitTracker />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   )

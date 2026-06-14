@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .base import BaseScraper, NormalizedListing, ScraperHealth
+from .base import BaseScraper, NormalizedListing, ScraperHealth, extract_price
 from backend.services.paths import get_screenshots_dir, get_browser_sessions_dir
 
 logger = logging.getLogger("platapicker.scrapers.facebook")
@@ -260,9 +260,14 @@ class FacebookScraper(BaseScraper):
         import urllib.parse
         kw_enc = urllib.parse.quote(keyword)
         city = location.replace(", ", "-").replace(" ", "-").lower()
+        # Newest-first so fresh listings surface immediately instead of waiting
+        # hours for Facebook's "recommended" ranking to pick them up.
+        # daysSinceListed caps results to the past week — older live listings
+        # are already in the DB from prior runs.
         return (
             f"https://www.facebook.com/marketplace/{city}/search"
             f"?query={kw_enc}&radius={radius_miles}"
+            f"&sortBy=creation_time_descend&daysSinceListed=7"
         )
 
     async def _extract_listing_cards(self) -> list[dict]:
@@ -368,15 +373,7 @@ class FacebookScraper(BaseScraper):
             return None
 
     def _extract_price(self, text: str) -> Optional[float]:
-        if not text:
-            return None
-        match = re.search(r"\$?([\d,]+\.?\d*)", text.replace(",", ""))
-        if match:
-            try:
-                return float(match.group(1).replace(",", ""))
-            except ValueError:
-                return None
-        return None
+        return extract_price(text)
 
     def parse_listing(self, raw: dict) -> Optional[NormalizedListing]:
         if not raw.get("title"):

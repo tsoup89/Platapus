@@ -4,6 +4,23 @@ const BASE = import.meta.env.VITE_API_URL || ''
 
 const api = axios.create({ baseURL: `${BASE}/api` })
 
+// Normalize errors so e.message always carries the most useful detail:
+// backend `detail` if present, a friendly note when the backend is down,
+// and a console.error so failures are never fully silent.
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string' && detail) {
+      err.message = detail
+    } else if (!err.response && err.request) {
+      err.message = 'Cannot reach the backend — is it running?'
+    }
+    console.error(`API ${err.config?.method?.toUpperCase()} ${err.config?.url} failed: ${err.message}`)
+    return Promise.reject(err)
+  }
+)
+
 export const getOverview = () => api.get('/overview').then(r => r.data)
 export const getSources = () => api.get('/sources').then(r => r.data)
 export const getSourceRuns = (name, limit = 20) => api.get(`/sources/${name}/runs`, { params: { limit } }).then(r => r.data)
@@ -93,6 +110,12 @@ export const createSellListing = (itemId, data) => api.post(`/inventory/${itemId
 export const updateSellListing = (id, data) => api.patch(`/sell-listings/${id}`, data).then(r => r.data)
 export const markSellListingSold = (id, data) => api.post(`/sell-listings/${id}/mark-sold`, data).then(r => r.data)
 export const removeSellListing = (id) => api.post(`/sell-listings/${id}/remove`).then(r => r.data)
+
+// ── Pricing Audit ──────────────────────────────────────────
+export const getPricingStatus = () => api.get('/pricing/status').then(r => r.data)
+export const getPricingComps = (params = {}) => api.get('/pricing/comps', { params }).then(r => r.data)
+export const getPricingTrace = (listingId) => api.get(`/pricing/trace/${listingId}`).then(r => r.data)
+export const diagnosePricing = (data) => api.post('/pricing/diagnose', data).then(r => r.data)
 
 // ── Sell analytics ─────────────────────────────────────────
 export const getSellDashboard = () => api.get('/sell/dashboard').then(r => r.data)

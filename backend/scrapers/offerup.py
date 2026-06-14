@@ -12,7 +12,7 @@ import urllib.parse
 from datetime import datetime
 from typing import Optional
 
-from .base import BaseScraper, NormalizedListing, ScraperHealth
+from .base import BaseScraper, NormalizedListing, ScraperHealth, extract_price
 from backend.services.paths import get_screenshots_dir
 
 logger = logging.getLogger("platapicker.scrapers.offerup")
@@ -36,16 +36,7 @@ BLOCK_INDICATORS = [
 ]
 
 
-def _extract_price(text: str) -> Optional[float]:
-    if not text:
-        return None
-    match = re.search(r"\$?([\d,]+\.?\d*)", str(text).replace(",", ""))
-    if match:
-        try:
-            return float(match.group(1).replace(",", ""))
-        except ValueError:
-            return None
-    return None
+_extract_price = extract_price
 
 
 class OfferUpScraper(BaseScraper):

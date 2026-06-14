@@ -20,6 +20,7 @@ class Watchlist(Base):
     category = Column(String)
     keywords_json = Column(Text, default="[]")
     negative_keywords_json = Column(Text, default="[]")
+    required_keywords_json = Column(Text, default="[]")  # any-of relevance gate (kept only if title/desc matches one)
     brands_json = Column(Text, default="[]")
     aliases_json = Column(Text, default="[]")
     locations_json = Column(Text, default="[]")
@@ -33,6 +34,9 @@ class Watchlist(Base):
     min_profit_dollars = Column(Float, default=50)
     discord_webhook_id = Column(Integer, ForeignKey("discord_webhooks.id"), nullable=True)
     notes = Column(Text, default="")
+    # ── Scoring adjustments ─────────────────────────────────────────────────
+    estimated_shipping_cost = Column(Float, default=0.0)  # sell-side shipping per item
+    sales_tax_rate = Column(Float, default=0.0)           # buy-side tax rate (e.g. 0.08)
     # ── Automation ──────────────────────────────────────────────────────────
     auto_outreach_enabled = Column(Boolean, default=False)
     outreach_message_template = Column(Text, default="")  # empty = use default
@@ -58,6 +62,14 @@ class Watchlist(Base):
     @negative_keywords.setter
     def negative_keywords(self, value):
         self.negative_keywords_json = json.dumps(value)
+
+    @property
+    def required_keywords(self):
+        return json.loads(self.required_keywords_json or "[]")
+
+    @required_keywords.setter
+    def required_keywords(self, value):
+        self.required_keywords_json = json.dumps(value)
 
     @property
     def brands(self):
@@ -164,6 +176,10 @@ class Listing(Base):
     # ── Auto-outreach ───────────────────────────────────────────────────────
     outreach_status = Column(String, nullable=True)    # None | QUEUED | SENT | FAILED
     outreach_sent_at = Column(DateTime, nullable=True)
+    # ── Photo analysis (OCR / model recognition, added 2026-06-01) ───────────
+    detected_brand = Column(String, nullable=True)
+    detected_model = Column(String, nullable=True)
+    photo_analysis_json = Column(Text, nullable=True)
 
     watchlist = relationship("Watchlist", back_populates="listings")
     deal_score = relationship("DealScore", back_populates="listing", uselist=False)
@@ -182,6 +198,14 @@ class Listing(Base):
     def raw_payload(self, value):
         self.raw_payload_json = json.dumps(value, default=str)
 
+    @property
+    def photo_analysis(self):
+        return json.loads(self.photo_analysis_json) if self.photo_analysis_json else None
+
+    @photo_analysis.setter
+    def photo_analysis(self, value):
+        self.photo_analysis_json = json.dumps(value) if value is not None else None
+
 
 class DealScore(Base):
     __tablename__ = "deal_scores"
@@ -198,6 +222,22 @@ class DealScore(Base):
     confidence = Column(Float, default=0)
     reasons_json = Column(Text, default="[]")
     warnings_json = Column(Text, default="[]")
+    # ── Net Flip Score + new signal detail (added 2026-06-01) ────────────────
+    net_flip_score = Column(Float, nullable=True)       # 0-100
+    estimated_roi_percent = Column(Float, nullable=True)
+    net_profit = Column(Float, nullable=True)
+    risk_level = Column(String, nullable=True)          # LOW | MEDIUM | HIGH
+    confidence_label = Column(String, nullable=True)    # LOW | MEDIUM | HIGH
+    net_flip_json = Column(Text, nullable=True)         # full NetFlipResult dict
+    bad_listing_json = Column(Text, nullable=True)      # BadListingResult dict
+    bundle_json = Column(Text, nullable=True)           # BundleResult dict
+    # How estimated_value was derived (added 2026-06-14): ebay | maker_checker |
+    # local_llm | table | gamecube — plus the maker-checker breakdown for the UI.
+    value_source = Column(String, nullable=True)
+    pricing_breakdown_json = Column(Text, nullable=True)
+    # Negotiable / no-fixed-price "heads-up" lead (CL best-offer, $0). Alerts on
+    # resale value rather than a price ratio. (added 2026-06-14)
+    is_lead = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now)
 
     listing = relationship("Listing", back_populates="deal_score")
@@ -217,6 +257,38 @@ class DealScore(Base):
     @warnings.setter
     def warnings(self, value):
         self.warnings_json = json.dumps(value)
+
+    @property
+    def net_flip(self):
+        return json.loads(self.net_flip_json) if self.net_flip_json else None
+
+    @net_flip.setter
+    def net_flip(self, value):
+        self.net_flip_json = json.dumps(value) if value is not None else None
+
+    @property
+    def bad_listing(self):
+        return json.loads(self.bad_listing_json) if self.bad_listing_json else None
+
+    @bad_listing.setter
+    def bad_listing(self, value):
+        self.bad_listing_json = json.dumps(value) if value is not None else None
+
+    @property
+    def bundle(self):
+        return json.loads(self.bundle_json) if self.bundle_json else None
+
+    @bundle.setter
+    def bundle(self, value):
+        self.bundle_json = json.dumps(value) if value is not None else None
+
+    @property
+    def pricing_breakdown(self):
+        return json.loads(self.pricing_breakdown_json) if self.pricing_breakdown_json else None
+
+    @pricing_breakdown.setter
+    def pricing_breakdown(self, value):
+        self.pricing_breakdown_json = json.dumps(value) if value is not None else None
 
 
 class DiscordWebhook(Base):
@@ -250,6 +322,32 @@ class GameCubePrice(Base):
     last_updated = Column(DateTime, default=now)
 
     title_mappings = relationship("TitleMapping", back_populates="gamecube_price")
+
+    @property
+    def aliases(self):
+        return json.loads(self.aliases_json or "[]")
+
+    @aliases.setter
+    def aliases(self, value):
+        self.aliases_json = json.dumps(value)
+
+
+class EspressoPrice(Base):
+    """Manual price reference for espresso machines — used instead of eBay sold
+    comps (which eBay aggressively rate-limits). `used_price` is the typical
+    secondhand resale value; the scorer treats it as estimated_value and derives
+    conservative_value = 0.8 x. Matched against listing titles by `match_key`."""
+    __tablename__ = "espresso_prices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    brand = Column(String, nullable=False)
+    model = Column(String, default="")
+    match_key = Column(String, nullable=False, index=True)  # normalized "brand model" all-tokens-must-appear
+    used_price = Column(Float, nullable=False)              # typical used resale value
+    new_price = Column(Float, nullable=True)
+    notes = Column(String, default="")
+    aliases_json = Column(Text, default="[]")
+    last_updated = Column(DateTime, default=now)
 
     @property
     def aliases(self):
@@ -441,3 +539,13 @@ class MarketValueCache(Base):
     source = Column(String, default="ebay_sold")
     fetched_at = Column(DateTime, default=now)
     expires_at = Column(DateTime, nullable=True)
+    # Optional source-specific detail blob (e.g. maker-checker pricing breakdown)
+    details_json = Column(Text, nullable=True)
+
+    @property
+    def details(self):
+        return json.loads(self.details_json) if self.details_json else None
+
+    @details.setter
+    def details(self, value):
+        self.details_json = json.dumps(value) if value is not None else None

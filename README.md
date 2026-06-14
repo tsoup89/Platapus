@@ -15,6 +15,10 @@ Platapicker monitors multiple sources (Facebook Marketplace, AuctionNinja) for d
 - **Values** GameCube bundles using a pricing table with fuzzy title matching
 - **Remembers** seen listings to avoid duplicate alerts
 - **Shows** everything in a local web dashboard
+- **Scores deeper** with a **Net Flip Score** (real net profit/ROI after fees,
+  shipping, repair, tax & risk), a **bad-listing / undervaluation detector**,
+  **bundle break-apart valuation**, and opt-in **photo OCR / model recognition** —
+  see [docs/scoring.md](docs/scoring.md)
 
 ---
 

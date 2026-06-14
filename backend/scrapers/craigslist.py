@@ -14,7 +14,7 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from .base import BaseScraper, NormalizedListing
+from .base import BaseScraper, NormalizedListing, extract_price, get_with_retry
 from backend.services.paths import get_screenshots_dir
 
 logger = logging.getLogger("platapicker.scrapers.craigslist")
@@ -92,42 +92,160 @@ CITY_SUBDOMAIN_MAP: dict[str, str] = {
     "richmond, va": "richmond",
     "orlando, fl": "orlando",
     "salt lake city, ut": "saltlakecity",
+    # Metros whose subdomain differs from a naive city slug
+    "st. louis, mo": "stlouis",
+    "st louis, mo": "stlouis",
+    "saint louis, mo": "stlouis",
+    "st. paul, mn": "minneapolis",
+    "st paul, mn": "minneapolis",
+    "colorado springs, co": "cosprings",
+    "oakland, ca": "sfbay",
+    "long beach, ca": "losangeles",
+    "anaheim, ca": "orangecounty",
+    "santa ana, ca": "orangecounty",
+    "irvine, ca": "orangecounty",
+    "newark, nj": "newjersey",
+    "jersey city, nj": "newjersey",
+    "brooklyn, ny": "newyork",
+    "queens, ny": "newyork",
+    "bronx, ny": "newyork",
+    "arlington, tx": "dallas",
+    "tacoma, wa": "seattle",
+    "portland, me": "maine",
+    "winston-salem, nc": "winstonsalem",
+    "fort lauderdale, fl": "miami",
+    "st. petersburg, fl": "tampa",
+    "st petersburg, fl": "tampa",
+    # Smaller NYC-metro towns that slugify to dead subdomains otherwise
+    "hastings on hudson, new york": "newyork",
+    "hastings on hudson, ny": "newyork",
+    "hastings-on-hudson, ny": "newyork",
+    "yonkers, ny": "newyork",
+    "white plains, ny": "newyork",
 }
+
+# Last-resort fallback by US state when the city isn't in the map and there's no
+# ZIP. Maps to each state's largest Craigslist region. Imperfect for big states
+# (CA/NY/TX have several regions) but far better than guessing a dead subdomain —
+# a real regional site returns results; a slugged town name returns nothing.
+STATE_DEFAULT_SUBDOMAIN: dict[str, str] = {
+    "new york": "newyork", "ny": "newyork",
+    "new jersey": "newjersey", "nj": "newjersey",
+    "connecticut": "newyork", "ct": "newyork",
+    "california": "losangeles", "ca": "losangeles",
+    "massachusetts": "boston", "ma": "boston",
+    "illinois": "chicago", "il": "chicago",
+    "texas": "dallas", "tx": "dallas",
+    "florida": "miami", "fl": "miami",
+    "washington": "seattle", "wa": "seattle",
+    "oregon": "portland", "or": "portland",
+    "georgia": "atlanta", "ga": "atlanta",
+    "pennsylvania": "philadelphia", "pa": "philadelphia",
+    "colorado": "denver", "co": "denver",
+    "arizona": "phoenix", "az": "phoenix",
+}
+
+
+def _zip_prefix_map() -> dict[str, str]:
+    """3-digit ZIP (SCF) prefix → Craigslist regional subdomain for major metros.
+
+    Craigslist is organized by regional site, not by ZIP, so a bare ZIP can't be
+    used as a subdomain — 10706.craigslist.org does not exist. We resolve the
+    ZIP's SCF prefix to the correct regional site, then let postal+search_distance
+    do the actual radius filtering within that site.
+    """
+    ranges = {
+        "newyork": list(range(100, 120)),          # NYC metro incl. Westchester/LI (10706 → 107)
+        "newjersey": list(range(70, 80)),          # North Jersey
+        "southjersey": list(range(80, 85)),
+        "cnj": list(range(85, 90)),                # Central Jersey
+        "boston": list(range(20, 28)),
+        "washingtondc": list(range(200, 206)) + list(range(220, 224)),
+        "philadelphia": [188, 189, 190, 191, 194],
+        "chicago": list(range(600, 609)),
+        "losangeles": list(range(900, 909)) + list(range(910, 919)),
+        "sandiego": [919, 920, 921],
+        "sfbay": [940, 941, 943, 944, 945, 946, 947, 948, 949, 950, 951],
+        "sacramento": [956, 957, 958],
+        "seattle": [980, 981, 982, 983, 984],
+        "portland": [970, 971, 972],
+        "miami": [330, 331, 332, 333, 334],
+        "atlanta": [300, 301, 302, 303, 311],
+        "dallas": [750, 751, 752, 753],
+        "houston": [770, 771, 772, 773],
+        "austin": [786, 787],
+        "denver": [800, 801, 802],
+        "phoenix": [850, 851, 852, 853],
+    }
+    out: dict[str, str] = {}
+    for subdomain, prefixes in ranges.items():
+        for p in prefixes:
+            out[f"{p:03d}"] = subdomain
+    return out
+
+
+ZIP_PREFIX_SUBDOMAIN = _zip_prefix_map()
+
+_POSTAL_RE = re.compile(r"\b(\d{5})\b")
+
+
+def _extract_postal(location: str) -> Optional[str]:
+    """Pull a 5-digit ZIP out of a location string ("10706" or "Yonkers, NY 10706")."""
+    m = _POSTAL_RE.search(location or "")
+    return m.group(1) if m else None
 
 
 def _location_to_subdomain(location: str) -> str:
     """
     Convert a human-readable location string to a Craigslist city subdomain.
-    Falls back to a simple slug of the first component before the comma.
+    Resolves bare ZIP codes via their SCF prefix; falls back to the city map,
+    then to a simple slug of the first component before the comma.
     """
     normalized = location.strip().lower()
     if normalized in CITY_SUBDOMAIN_MAP:
         return CITY_SUBDOMAIN_MAP[normalized]
+
+    # ZIP code ("10706" or "...NY 10706") → regional site via 3-digit SCF prefix.
+    postal = _extract_postal(location)
+    if postal:
+        sub = ZIP_PREFIX_SUBDOMAIN.get(postal[:3])
+        if sub:
+            return sub
+        if normalized == postal:
+            logger.warning(
+                f"Craigslist: ZIP '{postal}' (prefix '{postal[:3]}') has no regional "
+                "site mapping — add it to ZIP_PREFIX_SUBDOMAIN. Skipping this run."
+            )
+            return postal  # unresolved host → handled downstream as zero results
 
     # Try prefix match (e.g. "New York" without state)
     for key, subdomain in CITY_SUBDOMAIN_MAP.items():
         if normalized.startswith(key.split(",")[0]):
             return subdomain
 
-    # Generic fallback: strip spaces from the part before the comma
+    # State fallback — an unmapped town like "Hastings on Hudson, New York" would
+    # otherwise slug to a dead host. Resolve to the state's main region instead.
+    if "," in normalized:
+        state_token = normalized.rsplit(",", 1)[1].strip()
+        sub = STATE_DEFAULT_SUBDOMAIN.get(state_token)
+        if sub:
+            logger.info(
+                f"Craigslist: '{location}' not mapped; using state default '{sub}'"
+            )
+            return sub
+
+    # Generic fallback: strip spaces from the part before the comma. May not be a
+    # real subdomain (handled downstream as zero results) — warn loudly.
     city_part = normalized.split(",")[0].strip()
     slug = re.sub(r"[^a-z0-9]", "", city_part)
     logger.warning(
-        f"Craigslist: unknown location '{location}', guessing subdomain '{slug}'"
+        f"Craigslist: unknown location '{location}', guessing subdomain '{slug}' "
+        "(may not exist — set this watchlist's location to a ZIP or major metro)"
     )
     return slug
 
 
-def _extract_price(text: str) -> Optional[float]:
-    if not text:
-        return None
-    match = re.search(r"\$?([\d,]+\.?\d*)", text.replace(",", ""))
-    if match:
-        try:
-            return float(match.group(1).replace(",", ""))
-        except ValueError:
-            pass
-    return None
+_extract_price = extract_price
 
 
 def _parse_date(date_str: str) -> Optional[datetime]:
@@ -168,6 +286,10 @@ class CraigslistScraper(BaseScraper):
     ) -> list[dict]:
         """Try JSON endpoint first; fall back to HTML parsing."""
         subdomain = _location_to_subdomain(location)
+        # Geo filter — applied to every search URL so results are constrained to
+        # `radius_miles` of the watchlist ZIP rather than the whole regional site.
+        self._postal = _extract_postal(location)
+        self._search_distance = radius_miles or 50
         results: list[dict] = []
 
         for page in range(MAX_PAGES):
@@ -243,6 +365,14 @@ class CraigslistScraper(BaseScraper):
     # JSON endpoint
     # ------------------------------------------------------------------
 
+    def _geo_params(self) -> str:
+        """`&postal=…&search_distance=…` for radius filtering, or '' if no ZIP."""
+        postal = getattr(self, "_postal", None)
+        if not postal:
+            return ""
+        distance = int(getattr(self, "_search_distance", 50) or 50)
+        return f"&postal={postal}&search_distance={distance}"
+
     def _fetch_json_page(
         self, subdomain: str, keyword: str, offset: int
     ) -> Optional[list[dict]]:
@@ -253,9 +383,10 @@ class CraigslistScraper(BaseScraper):
         url = (
             f"https://{subdomain}.craigslist.org/search/sss"
             f"?query={requests.utils.quote(keyword)}&format=json&start={offset}"
+            f"{self._geo_params()}"
         )
         try:
-            resp = self._session.get(url, timeout=15)
+            resp = get_with_retry(self._session, url, timeout=15, log=logger)
             if resp.status_code == 404:
                 logger.error(
                     f"Craigslist: subdomain '{subdomain}' not found (HTTP 404). "
@@ -305,9 +436,10 @@ class CraigslistScraper(BaseScraper):
         url = (
             f"https://{subdomain}.craigslist.org/search/sss"
             f"?query={requests.utils.quote(keyword)}&start={offset}"
+            f"{self._geo_params()}"
         )
         try:
-            resp = self._session.get(url, timeout=15)
+            resp = get_with_retry(self._session, url, timeout=15, log=logger)
             if resp.status_code == 404:
                 logger.error(
                     f"Craigslist HTML: subdomain '{subdomain}' not found (HTTP 404)."
@@ -355,27 +487,36 @@ class CraigslistScraper(BaseScraper):
 
     def _parse_html_card(self, card, subdomain: str) -> Optional[dict]:
         """Extract data from a single Craigslist HTML listing card."""
-        # Listing ID from data-pid attribute
-        listing_id = card.get("data-pid") or card.get("id")
-
-        # Title and URL
+        # URL first (we derive the listing id from it on static cards)
         anchor = card.select_one("a.cl-app-anchor") or card.select_one("a[href]")
-        title = None
         url = None
         if anchor:
-            title = anchor.get_text(strip=True) or anchor.get("title")
             href = anchor.get("href", "")
             if href:
                 url = href if href.startswith("http") else f"https://{subdomain}.craigslist.org{href}"
 
-        # Fallback title from text content
-        if not title:
-            title_el = card.select_one(".title") or card.select_one("[class*='title']")
-            if title_el:
-                title = title_el.get_text(strip=True)
+        # Title: prefer the dedicated title node or the <li title="…"> attribute.
+        # Do NOT fall back to anchor.get_text() — on the static results page the
+        # anchor also wraps the price and location, producing a polluted title
+        # like "La Cimbali … Espresso Machine$19,500Los Angeles" that breaks comp
+        # lookups and deal scoring downstream.
+        title_el = card.select_one(".title") or card.select_one("[class*='title']")
+        title = (
+            (title_el.get_text(strip=True) if title_el else None)
+            or card.get("title")
+            or (anchor.get("title") if anchor else None)
+        )
 
         if not title:
             return None
+
+        # Listing ID: legacy cards expose data-pid; static cards don't, but the
+        # numeric id lives in the URL (…/d/<slug>/<id>.html).
+        listing_id = card.get("data-pid") or card.get("id")
+        if not listing_id and url:
+            m = re.search(r"/(\d+)\.html", url)
+            if m:
+                listing_id = m.group(1)
 
         # Price
         price_el = card.select_one(".priceinfo") or card.select_one("[class*='price']")
@@ -440,6 +581,7 @@ class CraigslistScraper(BaseScraper):
         url = (
             f"https://{subdomain}.craigslist.org/search/sss"
             f"?query={requests.utils.quote(keyword)}&start={offset}"
+            f"{self._geo_params()}"
         )
         browser = None
         playwright = None

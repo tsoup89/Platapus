@@ -11,7 +11,8 @@ function LoginButton({ sourceName }) {
   const handleLogin = async () => {
     setStatus('opening')
     try {
-      await fetch(`/api/sources/${sourceName}/login`, { method: 'POST' })
+      const res = await fetch(`/api/sources/${sourceName}/login`, { method: 'POST' })
+      if (!res.ok) throw new Error(`Login request failed (${res.status})`)
       setStatus('done')
       setTimeout(() => setStatus('idle'), 8000)
     } catch {
@@ -175,7 +176,7 @@ export default function ScraperHealth() {
   const { data: sources, isLoading, error } = useQuery({
     queryKey: ['sources'],
     queryFn: getSources,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
   })
 
   if (isLoading) return <div className="loading">Loading scraper health...</div>

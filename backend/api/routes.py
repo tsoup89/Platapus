@@ -3,7 +3,7 @@ import csv
 import io
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
@@ -33,7 +33,7 @@ from backend.api.schemas import (
     SellListingOut, CreateSellListingIn, MarkSoldIn, UpdateSellListingIn,
 )
 from backend.services import discord as discord_service
-from backend.services.settings import get_all_settings, get_setting, set_setting
+from backend.services.settings import ALLOWED_KEYS, get_all_settings, get_setting, set_setting
 from backend.scoring.title_matcher import normalize_title
 from backend.services.runner import run_scraper_for_watchlist
 from backend.services import scheduler as scheduler_service
@@ -103,12 +103,15 @@ def create_watchlist(data: WatchlistCreate, db: Session = Depends(get_db)):
         min_profit_dollars=data.min_profit_dollars,
         discord_webhook_id=data.discord_webhook_id,
         notes=data.notes,
+        estimated_shipping_cost=data.estimated_shipping_cost,
+        sales_tax_rate=data.sales_tax_rate,
         auto_outreach_enabled=data.auto_outreach_enabled,
         outreach_message_template=data.outreach_message_template,
         auto_list_on_buy=data.auto_list_on_buy,
     )
     wl.keywords = data.keywords
     wl.negative_keywords = data.negative_keywords
+    wl.required_keywords = data.required_keywords
     wl.brands = data.brands
     wl.aliases = data.aliases
     wl.locations = data.locations
@@ -135,10 +138,12 @@ def update_watchlist(watchlist_id: int, data: WatchlistUpdate, db: Session = Dep
     for field in ["name", "enabled", "category", "radius_miles", "min_price",
                   "max_price", "run_frequency_minutes", "min_rating_to_alert",
                   "min_profit_margin", "min_profit_dollars", "discord_webhook_id", "notes",
+                  "estimated_shipping_cost", "sales_tax_rate",
                   "auto_outreach_enabled", "outreach_message_template", "auto_list_on_buy"]:
         setattr(wl, field, getattr(data, field))
     wl.keywords = data.keywords
     wl.negative_keywords = data.negative_keywords
+    wl.required_keywords = data.required_keywords
     wl.brands = data.brands
     wl.aliases = data.aliases
     wl.locations = data.locations
@@ -327,6 +332,9 @@ def manually_send_discord(listing_id: int, db: Session = Depends(get_db)):
         reasons=score.reasons if score else [],
         warnings=score.warnings if score else [],
         image_url=listing.image_url,
+        net_flip=score.net_flip if score else None,
+        bad_listing=score.bad_listing if score else None,
+        bundle=score.bundle if score else None,
     )
     if ok:
         listing.alert_sent = True
@@ -542,7 +550,19 @@ async def import_gamecube_csv(file: UploadFile = File(...), db: Session = Depend
         raise HTTPException(400, "Please upload a CSV file.")
 
     contents = await file.read()
-    text = contents.decode("utf-8-sig")
+    try:
+        text = contents.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = contents.decode("cp1252")
+        except UnicodeDecodeError:
+            text = ""
+    if not text or "\x00" in text:
+        # Undecodable, or a non-text encoding (e.g. UTF-16) that "decodes"
+        # into NUL-riddled garbage the csv module would choke on.
+        raise HTTPException(
+            400, "Could not read the CSV file — save it as UTF-8 and try again."
+        )
     reader = csv.DictReader(io.StringIO(text))
 
     imported = 0
@@ -745,6 +765,9 @@ def get_settings(db: Session = Depends(get_db)):
 
 @router.post("/settings")
 def update_settings(data: dict, db: Session = Depends(get_db)):
+    unknown = set(data) - ALLOWED_KEYS
+    if unknown:
+        raise HTTPException(422, f"Unknown setting keys: {', '.join(sorted(unknown))}")
     for key, value in data.items():
         set_setting(db, key, value)
 
@@ -844,6 +867,75 @@ def rescore_gamecube(db: Session = Depends(get_db)):
     return {"ok": True, "rescored": rescored, "message": f"Re-scored {rescored} GameCube listings."}
 
 
+@router.post("/maintenance/rescore-espresso")
+def rescore_espresso(db: Session = Depends(get_db)):
+    """Re-score all espresso watchlist listings using the espresso_prices table
+    (run after editing prices). Listings whose title doesn't match any table row
+    keep keyword/brand-only scoring."""
+    from backend.services.settings import get_all_settings
+    from backend.scoring.deal_scorer import score_listing
+    from backend.scoring.espresso_pricing import match_espresso_price
+    from backend.models.models import EspressoPrice
+    settings = get_all_settings(db)
+
+    wl = db.query(Watchlist).filter(Watchlist.category == "espresso").first()
+    if not wl:
+        raise HTTPException(404, "No espresso watchlist found.")
+
+    listings = db.query(Listing).filter(Listing.watchlist_id == wl.id).all()
+    if not listings:
+        return {"ok": True, "rescored": 0, "message": "No espresso listings to rescore."}
+
+    esp_prices = db.query(EspressoPrice).all()
+    thresholds = settings.get("deal_thresholds", {
+        "STEAL": 0.45, "GREAT": 0.55, "GOOD": 0.65, "FAIR": 0.75
+    })
+
+    rescored = 0
+    matched = 0
+    for listing in listings:
+        used_price, row = match_espresso_price(listing.title, esp_prices)
+        estimated_value = used_price
+        conservative_value = round(used_price * 0.8, 2) if used_price is not None else None
+        if used_price is not None:
+            matched += 1
+
+        result = score_listing(
+            title=listing.title,
+            description=listing.description or "",
+            price=listing.price or 0,
+            watchlist_keywords=wl.keywords,
+            watchlist_brands=wl.brands,
+            watchlist_negative_keywords=wl.negative_keywords,
+            thresholds=thresholds,
+            estimated_value=estimated_value,
+            conservative_value=conservative_value,
+            shipping_cost=wl.estimated_shipping_cost or 0.0,
+            tax_rate=wl.sales_tax_rate or 0.0,
+        )
+
+        existing = db.query(DealScore).filter(DealScore.listing_id == listing.id).first()
+        if not existing:
+            existing = DealScore(listing_id=listing.id)
+            db.add(existing)
+        existing.rating = result.rating
+        existing.score = result.score
+        existing.estimated_value = result.estimated_value
+        existing.conservative_value = result.conservative_value
+        existing.target_buy_price = result.target_buy_price
+        existing.estimated_profit = result.estimated_profit
+        existing.profit_margin = result.profit_margin
+        existing.confidence = result.confidence
+        existing.reasons = result.reasons
+        existing.warnings = result.warnings
+        existing.created_at = datetime.utcnow()
+        rescored += 1
+
+    db.commit()
+    return {"ok": True, "rescored": rescored, "matched": matched,
+            "message": f"Re-scored {rescored} espresso listings ({matched} matched a price)."}
+
+
 # ─────────────────────────────────────────────────────────────
 # Market Value
 # ─────────────────────────────────────────────────────────────
@@ -937,8 +1029,8 @@ def scheduler_reschedule(interval_minutes: int, db: Session = Depends(get_db)):
 
 @router.get("/facebook/session-status")
 def facebook_session_status():
-    from pathlib import Path
-    session_file = Path("browser_sessions/facebook/session.json")
+    from backend.services.paths import get_browser_sessions_dir
+    session_file = get_browser_sessions_dir() / "facebook" / "session.json"
     if session_file.exists():
         size = session_file.stat().st_size
         mtime = datetime.utcfromtimestamp(session_file.stat().st_mtime).isoformat()
@@ -1360,14 +1452,17 @@ def create_sell_listing(
         except Exception as e:
             logger.error(f"FB listing background task failed: {e}", exc_info=True)
             try:
+                bdb.rollback()
                 row = bdb.query(SellListing).filter(SellListing.id == sell_listing_id).first()
                 if row:
                     row.status = "FAILED"
                     row.error_message = str(e)
                     row.action_url = "https://www.facebook.com/marketplace/create/item"
                     bdb.commit()
-            except Exception:
-                pass
+            except Exception as mark_err:
+                logger.error(
+                    f"Could not mark SellListing {sell_listing_id} as FAILED: {mark_err}"
+                )
         finally:
             bdb.close()
 
@@ -1603,8 +1698,31 @@ def get_sell_dashboard(db: Session = Depends(get_db)):
 
     # Failed listings
     failed = db.query(SellListing).filter(SellListing.status == "FAILED").all()
+
+    # Stale listings (POSTED but no sale for >30 days)
+    stale = db.query(SellListing).filter(
+        SellListing.status == "POSTED",
+        SellListing.listed_at <= stale_threshold,
+    ).all()
+
+    # Recent activity (last 20 status changes)
+    recent_listings = db.query(SellListing).order_by(
+        SellListing.updated_at.desc()
+    ).limit(20).all()
+
+    # Single batched lookup for every inventory item referenced above
+    inv_ids = {
+        sl.inventory_item_id
+        for sl in (*failed, *stale, *recent_listings)
+        if sl.inventory_item_id is not None
+    }
+    inv_by_id = {
+        item.id: item
+        for item in db.query(InventoryItem).filter(InventoryItem.id.in_(inv_ids)).all()
+    } if inv_ids else {}
+
     for sl in failed:
-        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        inv_item = inv_by_id.get(sl.inventory_item_id)
         attention.append({
             "type": "failed_listing",
             "inventory_item_id": sl.inventory_item_id,
@@ -1614,13 +1732,8 @@ def get_sell_dashboard(db: Session = Depends(get_db)):
             "message": f"{sl.platform.title()} listing failed — {(sl.error_message or '')[:80]}",
         })
 
-    # Stale listings (POSTED but no sale for >30 days)
-    stale = db.query(SellListing).filter(
-        SellListing.status == "POSTED",
-        SellListing.listed_at <= stale_threshold,
-    ).all()
     for sl in stale:
-        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        inv_item = inv_by_id.get(sl.inventory_item_id)
         days = (now - sl.listed_at).days if sl.listed_at else "?"
         attention.append({
             "type": "stale_listing",
@@ -1631,13 +1744,9 @@ def get_sell_dashboard(db: Session = Depends(get_db)):
             "message": f"Listed on {sl.platform.title()} for {days} days — consider a price drop",
         })
 
-    # Recent activity (last 20 status changes)
-    recent_listings = db.query(SellListing).order_by(
-        SellListing.updated_at.desc()
-    ).limit(20).all()
     activity = []
     for sl in recent_listings:
-        inv_item = db.query(InventoryItem).filter(InventoryItem.id == sl.inventory_item_id).first()
+        inv_item = inv_by_id.get(sl.inventory_item_id)
         activity.append({
             "sell_listing_id": sl.id,
             "inventory_item_id": sl.inventory_item_id,
@@ -2031,3 +2140,208 @@ def save_push_token(data: PushTokenIn, db: Session = Depends(get_db)):
     """Store the device's Expo push token so runner.py can send deal alerts."""
     set_setting(db, "expo_push_token", data.token)
     return {"ok": True}
+
+
+# ── Pricing Audit ──────────────────────────────────────────────────────────────
+# Endpoints powering the Pricing Audit page: is the pricing logic online, what
+# were the last eBay/AI comps, the per-listing decision trace, and a live re-query
+# of both qwen models to inspect their raw responses.
+
+@router.get("/pricing/status")
+def pricing_status(db: Session = Depends(get_db)):
+    """System health for the pricing pipeline: Ollama reachability + which models
+    are loaded, the eBay source's last run/success, local-LLM config, and a summary
+    of the comp cache. This is the 'is the logic online' panel."""
+    from backend.services.local_llm_pricing import ollama_status
+
+    settings = get_all_settings(db)
+    ollama = ollama_status(settings)
+
+    ebay = db.query(Source).filter(Source.name == "ebay").first()
+    ebay_info = None
+    if ebay:
+        ebay_info = {
+            "enabled": ebay.enabled,
+            "status": ebay.status,
+            "last_run_at": ebay.last_run_at.isoformat() if ebay.last_run_at else None,
+            "last_success_at": ebay.last_success_at.isoformat() if ebay.last_success_at else None,
+            "last_error": ebay.last_error,
+        }
+
+    now = datetime.utcnow()
+    cache_summary = []
+    for src in ("ebay", "ebay_sold", "local_llm"):
+        rows = db.query(MarketValueCache).filter(MarketValueCache.source == src).all()
+        if not rows:
+            continue
+        fresh = sum(1 for r in rows if r.expires_at and r.expires_at > now)
+        newest = max((r.fetched_at for r in rows if r.fetched_at), default=None)
+        cache_summary.append({
+            "source": src,
+            "total": len(rows),
+            "fresh": fresh,
+            "newest_fetched_at": newest.isoformat() if newest else None,
+        })
+
+    return {
+        "ollama": ollama,
+        "ebay": ebay_info,
+        "config": {
+            "local_llm_pricing_enabled": settings.get("local_llm_pricing_enabled", True),
+            "local_llm_checker_enabled": settings.get("local_llm_checker_enabled", True),
+            "local_llm_model": settings.get("local_llm_model", "qwen3:30b"),
+            "local_llm_checker_model": settings.get("local_llm_checker_model", "qwen3-coder:30b"),
+            "local_llm_agreement_tolerance": settings.get("local_llm_agreement_tolerance", 0.25),
+            "local_llm_base_url": settings.get("local_llm_base_url", "http://localhost:11434"),
+        },
+        "cache": cache_summary,
+    }
+
+
+@router.get("/pricing/comps")
+def pricing_comps(source: Optional[str] = None, q: Optional[str] = None,
+                  limit: int = 100, db: Session = Depends(get_db)):
+    """Recent market-value cache rows (the 'last eBay/AI prices'). Filter by source
+    or a keyword substring. Newest first."""
+    query = db.query(MarketValueCache)
+    if source:
+        query = query.filter(MarketValueCache.source == source)
+    if q:
+        query = query.filter(MarketValueCache.keyword.ilike(f"%{q}%"))
+    rows = query.order_by(MarketValueCache.fetched_at.desc()).limit(min(limit, 500)).all()
+    now = datetime.utcnow()
+    return [{
+        "id": r.id,
+        "keyword": r.keyword,
+        "category": r.category,
+        "source": r.source,
+        "median_price": r.median_price,
+        "mean_price": r.mean_price,
+        "min_price": r.min_price,
+        "max_price": r.max_price,
+        "sample_count": r.sample_count,
+        "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+        "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+        "fresh": bool(r.expires_at and r.expires_at > now),
+        "details": r.details,
+    } for r in rows]
+
+
+@router.get("/pricing/trace/{listing_id}")
+def pricing_trace(listing_id: int, db: Session = Depends(get_db)):
+    """Full pricing decision trace for one listing: which pricing sources were
+    eligible, which one produced the value, the resulting score economics, and the
+    maker-checker breakdown (including each model's raw response, if captured)."""
+    from backend.services.market_value import extract_search_keyword
+
+    listing = db.query(Listing).filter(Listing.id == listing_id).first()
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+    score = listing.deal_score
+    wl = listing.watchlist
+    category = wl.category if wl else None
+
+    # Recompute the keyword the runner would have used, so we can surface the
+    # matching comp-cache row(s).
+    if listing.detected_brand and listing.detected_model:
+        keyword = f"{listing.detected_brand} {listing.detected_model}"
+    elif wl:
+        keyword = extract_search_keyword(listing.title, wl.brands)
+    else:
+        keyword = listing.title
+    cache_rows = (
+        db.query(MarketValueCache)
+        .filter(MarketValueCache.keyword == keyword)
+        .all()
+    )
+    now = datetime.utcnow()
+    comps = [{
+        "source": r.source, "category": r.category,
+        "median_price": r.median_price, "min_price": r.min_price, "max_price": r.max_price,
+        "sample_count": r.sample_count,
+        "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+        "fresh": bool(r.expires_at and r.expires_at > now),
+        "details": r.details,
+    } for r in cache_rows]
+
+    value_source = getattr(score, "value_source", None) if score else None
+
+    # Reconstruct the decision ladder the runner walks, marking which step won.
+    def step(name, label, eligible, won, note=""):
+        return {"name": name, "label": label, "eligible": eligible, "won": won, "note": note}
+
+    steps = [
+        step("gamecube", "GameCube price table", category == "gamecube",
+             value_source == "gamecube"),
+        step("espresso", "Espresso price table", category == "espresso",
+             value_source == "table"),
+        step("ebay", "eBay sold comps", category not in ("gamecube",),
+             value_source == "ebay",
+             "Cached comp matched" if value_source == "ebay" else ""),
+        step("maker_checker", "Local AI maker-checker", category not in ("gamecube",),
+             value_source == "maker_checker", "eBay returned no comp → AI gap-fill"),
+        step("negotiable", "Negotiable lead (resale-value bar)", True,
+             value_source == "negotiable", "No firm price; flagged on resale value"),
+    ]
+
+    score_out = None
+    if score:
+        score_out = {
+            "rating": score.rating, "score": score.score,
+            "estimated_value": score.estimated_value,
+            "conservative_value": score.conservative_value,
+            "target_buy_price": score.target_buy_price,
+            "estimated_profit": score.estimated_profit,
+            "profit_margin": score.profit_margin,
+            "confidence": score.confidence,
+            "value_source": value_source,
+            "is_lead": getattr(score, "is_lead", None),
+            "pricing_breakdown": getattr(score, "pricing_breakdown", None),
+            "reasons": score.reasons,
+            "warnings": score.warnings,
+        }
+
+    return {
+        "listing": {
+            "id": listing.id, "title": listing.title, "price": listing.price,
+            "source": listing.source, "url": listing.url, "image_url": listing.image_url,
+            "detected_brand": listing.detected_brand, "detected_model": listing.detected_model,
+        },
+        "watchlist": {"id": wl.id, "name": wl.name, "category": category} if wl else None,
+        "search_keyword": keyword,
+        "value_source": value_source,
+        "steps": steps,
+        "score": score_out,
+        "comps": comps,
+    }
+
+
+class DiagnoseIn(BaseModel):
+    keyword: str
+    category: Optional[str] = None
+
+
+@router.post("/pricing/diagnose")
+def pricing_diagnose(data: DiagnoseIn, db: Session = Depends(get_db)):
+    """Re-query both qwen models LIVE for a keyword (bypasses cache, no DB write).
+    Returns each model's value, confidence, latency and raw response, plus the
+    reconciled verdict — proves the AI pricing path is online."""
+    from backend.services.local_llm_pricing import diagnose_pricing
+
+    settings = get_all_settings(db)
+    return diagnose_pricing(data.keyword, data.category, settings=settings)
+
+
+@router.get("/weekly-review/preview")
+def weekly_review_preview(db: Session = Depends(get_db)):
+    """Generate the weekly-review payload WITHOUT posting to Discord (for the UI /
+    on-demand inspection)."""
+    from backend.services.weekly_review import generate_weekly_review
+    return generate_weekly_review(db)
+
+
+@router.post("/weekly-review/run")
+def weekly_review_run(db: Session = Depends(get_db)):
+    """Generate the weekly review and post it to the configured Discord webhook now."""
+    from backend.services.weekly_review import run_weekly_review
+    return run_weekly_review(db)

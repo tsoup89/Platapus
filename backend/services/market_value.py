@@ -18,19 +18,126 @@ from backend.models.models import MarketValueCache
 
 logger = logging.getLogger("platapicker.market_value")
 
+# Words that appear in listing titles but don't help eBay find the right comp.
+_FILLER_WORDS = {
+    # Category / appliance nouns
+    "coffee", "espresso", "machine", "maker", "grinder", "frother",
+    "steam", "pump", "pod", "capsule", "drip", "filter", "press",
+    "monitor", "display", "screen", "computer", "laptop", "gaming",
+    "furniture", "outdoor", "patio", "speaker", "audio", "sound",
+    "wireless", "bluetooth",
+    # Descriptors / materials
+    "stainless", "steel", "black", "white", "silver", "chrome",
+    "matte", "glossy", "polished", "brushed", "color",
+    # Condition words
+    "used", "like", "new", "great", "good", "excellent", "mint",
+    "condition", "works", "tested", "fully", "barely", "hardly",
+    "lightly", "gently", "perfect", "clean",
+    # Sale-ad filler
+    "price", "sale", "reduced", "negotiable", "bundle", "set",
+    "lot", "unit", "included", "comes", "free", "obo",
+    # Prepositions / articles / conjunctions
+    "and", "the", "in", "by", "with", "for", "or", "of", "a", "an",
+    "la", "le", "el", "de", "from", "to", "at", "on", "plus", "just",
+}
+
+
+def extract_search_keyword(title: str, brands: Optional[list] = None) -> str:
+    """
+    Reduce a verbose Facebook listing title to a clean 'Brand Model' keyword
+    suitable for eBay comp lookups.
+
+    Strategy:
+      1. Find the brand in the title (using the watchlist brands list as hints).
+      2. Remove the brand text and any 'by' connector from the remaining title.
+      3. Keep up to 3 non-filler words as the model name.
+      4. Return 'Brand model1 model2 …' (or just the original title if no brand matched).
+    """
+    if not brands:
+        return title
+
+    title_lower = title.lower()
+    found_brand = None
+
+    # Try longest brand names first so "Nespresso Vertuo" beats "Nespresso"
+    for brand in sorted(brands, key=len, reverse=True):
+        if brand.lower() in title_lower:
+            found_brand = brand
+            break
+
+    if not found_brand:
+        return title
+
+    # Remove the matched brand text from the title
+    cleaned = re.sub(re.escape(found_brand), "", title, flags=re.IGNORECASE)
+    # Drop "by" connectors that sometimes separate brand from model
+    cleaned = re.sub(r"\bby\b", " ", cleaned, flags=re.IGNORECASE)
+
+    model_words = []
+    for word in cleaned.split():
+        token = re.sub(r"[^\w]", "", word).lower()
+        if not token or len(token) < 2:
+            continue
+        if token in _FILLER_WORDS:
+            # Stop collecting once we have some model words and hit filler
+            if model_words:
+                break
+            continue
+        model_words.append(word.strip(",.!?-"))
+        if len(model_words) >= 3:
+            break
+
+    if not model_words:
+        return found_brand
+
+    return f"{found_brand} {' '.join(model_words)}"
+
+
 EBAY_SOLD_URL = (
     "https://www.ebay.com/sch/i.html?_nkw={keyword}&LH_Sold=1&LH_Complete=1&_sop=13"
 )
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
 }
+
+# eBay blocks cold requests (HTTP 403). A persistent session that first "warms up"
+# by visiting the homepage to collect cookies — then searches with a Referer and
+# Sec-Fetch-Site=same-origin — gets through, mirroring the buy-side EbayScraper.
+_session = None
+_warmed_up = False
+
+
+def _get_warm_session():
+    global _session, _warmed_up
+    import requests
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update(HEADERS)
+    if not _warmed_up:
+        try:
+            _session.headers["Sec-Fetch-Site"] = "none"
+            _session.get("https://www.ebay.com/", timeout=10)
+            _warmed_up = True
+        except Exception as e:
+            logger.warning(f"eBay warmup failed (non-fatal): {e}")
+    return _session
 
 
 @dataclass
@@ -60,12 +167,18 @@ def _parse_price(text: str) -> Optional[float]:
 
 def _fetch_with_requests(url: str) -> Optional[str]:
     try:
-        import requests
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            return resp.text
-        logger.warning(f"eBay returned HTTP {resp.status_code}")
-        return None
+        session = _get_warm_session()
+        session.headers["Referer"] = "https://www.ebay.com/"
+        session.headers["Sec-Fetch-Site"] = "same-origin"
+        resp = session.get(url, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(f"eBay returned HTTP {resp.status_code}")
+            return None
+        # A 200 can still be eBay's bot-challenge interstitial — treat as a miss.
+        if "pardon our interruption" in resp.text[:4000].lower():
+            logger.warning("eBay served bot-challenge interstitial (rate-limited)")
+            return None
+        return resp.text
     except Exception as e:
         logger.warning(f"requests fetch failed: {e}")
         return None
@@ -98,23 +211,36 @@ def _parse_prices_from_html(html: str) -> list[float]:
     soup = BeautifulSoup(html, "html.parser")
     prices: list[float] = []
 
-    # eBay listing cards: li.s-item or div.s-item__wrapper
-    items = soup.select("li.s-item")
-    if not items:
-        items = soup.select("div.s-item__wrapper")
+    # eBay's current layout: <li class="s-card" data-listingid> with
+    # <span class="s-card__price">. Fall back to the legacy s-item markup.
+    cards = [li for li in soup.find_all("li", class_="s-card") if li.get("data-listingid")]
+    if cards:
+        for card in cards:
+            title_el = card.select_one("div.s-card__title, span.s-card__title")
+            if title_el and title_el.get_text(strip=True).lower() in (
+                "shop on ebay", "results matching fewer words"
+            ):
+                continue
+            # A price range yields two spans — take the lower bound.
+            card_prices = [
+                _parse_price(el.get_text(strip=True))
+                for el in card.select("span.s-card__price")
+            ]
+            card_prices = [p for p in card_prices if p is not None and p > 0]
+            if card_prices:
+                prices.append(min(card_prices))
+        return prices
 
+    # Legacy fallback
+    items = soup.select("li.s-item") or soup.select("div.s-item__wrapper")
     for item in items:
-        # Skip the ghost "Shop on eBay" card that eBay injects
         title_el = item.select_one(".s-item__title")
         if title_el and "shop on ebay" in title_el.get_text(strip=True).lower():
             continue
-
         price_el = item.select_one(".s-item__price")
         if not price_el:
             continue
-
-        price_text = price_el.get_text(strip=True)
-        price = _parse_price(price_text)
+        price = _parse_price(price_el.get_text(strip=True))
         if price is not None and price > 0:
             prices.append(price)
 
@@ -258,6 +384,7 @@ def get_market_value(
         try:
             db.flush()
         except Exception as e:
+            db.rollback()
             logger.warning(f"Failed to cache market value for '{keyword}': {e}")
 
     logger.info(

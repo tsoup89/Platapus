@@ -23,7 +23,7 @@ def _post_webhook(webhook_url: str, payload: dict) -> bool:
         resp = httpx.post(webhook_url, json=payload, headers=_HEADERS, timeout=10)
         if resp.status_code in (200, 204):
             return True
-        logger.error(f"Discord webhook returned {resp.status_code}: {resp.text}")
+        logger.error(f"Discord webhook returned {resp.status_code}: {resp.text[:200]}")
         return False
     except Exception as e:
         logger.error(f"Discord webhook failed: {e}")
@@ -49,6 +49,9 @@ def send_deal_alert(
     claude_summary: Optional[str] = None,
     claude_flags: Optional[list] = None,
     claude_positives: Optional[list] = None,
+    net_flip: Optional[dict] = None,
+    bad_listing: Optional[dict] = None,
+    bundle: Optional[dict] = None,
 ) -> bool:
     emoji = RATING_EMOJI.get(rating, "📦")
 
@@ -75,6 +78,25 @@ def send_deal_alert(
         lines.append(f"**Target Buy Price:** {fmt_money(target_buy_price)}")
     if estimated_profit:
         lines.append(f"**Estimated Profit:** {fmt_money(estimated_profit)}{profit_margin}")
+    # ── Net Flip Score (concise economics line) ──────────────────────────────
+    if net_flip and net_flip.get("net_flip_score") is not None:
+        nf_parts = [f"Net Flip {net_flip['net_flip_score']}/100"]
+        if net_flip.get("estimated_roi_percent") is not None:
+            nf_parts.append(f"ROI {net_flip['estimated_roi_percent']:.0f}%")
+        if net_flip.get("estimated_net_profit") is not None:
+            nf_parts.append(f"net {fmt_money(net_flip['estimated_net_profit'])}")
+        if net_flip.get("risk_level"):
+            nf_parts.append(f"risk {net_flip['risk_level']}")
+        lines.append("**💰 " + " · ".join(nf_parts) + "**")
+    # ── Bundle break-apart hint ──────────────────────────────────────────────
+    if bundle and bundle.get("is_bundle"):
+        total = bundle.get("estimated_bundle_resale_total")
+        strat = bundle.get("recommended_strategy", "")
+        lines.append(f"**🧩 Bundle:** {strat} (~{fmt_money(total)} total)")
+    # ── Underpriced / bad-listing hint ───────────────────────────────────────
+    if bad_listing and bad_listing.get("bad_listing_good_item"):
+        sigs = ", ".join(bad_listing.get("detected_signals", [])[:2])
+        lines.append(f"**🔎 Possibly underpriced** ({bad_listing.get('undervaluation_score')}): {sigs}")
     if location:
         lines.append(f"**Location:** {location}")
     if reasons:
@@ -198,6 +220,17 @@ def send_batch_alert(
         meta = f" ({', '.join(meta_parts)})" if meta_parts else ""
 
         lines.append(f"{emoji} **{rating}** — {title} — {price_str}{meta}")
+        # Compact signal line
+        signal_parts = []
+        nf = deal.get("net_flip")
+        if nf and nf.get("net_flip_score") is not None:
+            signal_parts.append(f"⚡{nf['net_flip_score']} ROI {nf.get('estimated_roi_percent', 0):.0f}%")
+        if deal.get("bundle", {}) and deal["bundle"].get("is_bundle"):
+            signal_parts.append(f"🧩 Bundle ~{fmt_money(deal['bundle'].get('estimated_bundle_resale_total'))}")
+        if deal.get("bad_listing", {}) and deal["bad_listing"].get("bad_listing_good_item"):
+            signal_parts.append(f"🔎 Underpriced ({deal['bad_listing'].get('undervaluation_score')})")
+        if signal_parts:
+            lines.append("  " + " · ".join(signal_parts))
         if url:
             lines.append(f"🔗 {url}")
         lines.append("")
@@ -234,6 +267,80 @@ def send_test_message(webhook_url: str) -> bool:
         "content": "✅ **Platapicker** — Discord webhook is working! Your deal alerts will appear here."
     }
     return _post_webhook(webhook_url, payload)
+
+
+def send_weekly_review(webhook_url: str, review: dict) -> bool:
+    """Post the weekly review as a Discord embed. Built from the dict produced by
+    backend.services.weekly_review.generate_weekly_review()."""
+    h = review.get("health", {}) or {}
+    f = review.get("flow", {}) or {}
+    errs = review.get("errors", {}) or {}
+    tips = review.get("tuning", []) or []
+    days = review.get("window_days", 7)
+
+    o = h.get("ollama", {}) or {}
+    ebay = h.get("ebay") or {}
+    fields = []
+
+    # 1. Pricing pipeline health
+    ollama_line = "🟢 online" if o.get("reachable") else "🔴 offline"
+    if o.get("reachable") and (not o.get("maker_present") or not o.get("checker_present")):
+        ollama_line = "🟡 online (a model missing)"
+    ebay_line = "n/a"
+    if ebay:
+        ebay_line = f"{'🟢' if ebay.get('status') == 'healthy' else '🟡'} {ebay.get('status', '?')}"
+    disagree = h.get("maker_checker_disagree_pct")
+    disagree_line = (
+        f"{disagree}% needs-review ({h.get('maker_checker_needs_review', 0)}/{h.get('maker_checker_priced', 0)})"
+        if disagree is not None else "no AI pricing this week"
+    )
+    fields.append({
+        "name": "🩺 Pricing pipeline",
+        "value": (f"Ollama: {ollama_line}\neBay comps: {ebay_line}\n"
+                  f"Maker-checker disagreement: {disagree_line}"),
+        "inline": False,
+    })
+
+    # 2. Deal flow & alerts
+    r = f.get("ratings", {}) or {}
+    fields.append({
+        "name": "📦 Deal flow",
+        "value": (f"{f.get('new_listings', 0)} new listings · {f.get('alerts_sent', 0)} alerts · "
+                  f"💬 {f.get('leads', 0)} leads\n"
+                  f"💎 {r.get('STEAL', 0)} STEAL · 🔥 {r.get('GREAT', 0)} GREAT · "
+                  f"✅ {r.get('GOOD', 0)} GOOD"),
+        "inline": False,
+    })
+
+    # 3. Scraper / source errors
+    failed = errs.get("failed_by_source", {}) or {}
+    unhealthy = errs.get("unhealthy_sources", []) or []
+    if failed or unhealthy:
+        lines = []
+        for src, info in failed.items():
+            lines.append(f"⚠️ {src}: {info['count']} failed run(s)")
+        for u in unhealthy:
+            lines.append(f"⚠️ {u['name']}: {u['status']}")
+        fields.append({"name": "🛠️ Scraper errors", "value": "\n".join(lines[:8]) or "none",
+                       "inline": False})
+    else:
+        fields.append({"name": "🛠️ Scraper errors", "value": "None this week ✅", "inline": False})
+
+    # 4. Tuning suggestions
+    fields.append({
+        "name": "🎛️ Tuning suggestions",
+        "value": "\n".join(f"• {t}" for t in tips)[:1024],
+        "inline": False,
+    })
+
+    embed = {
+        "title": "📊 Platapicker Weekly Review",
+        "description": f"Last {days} days",
+        "color": 0x6C8EF7,
+        "fields": fields,
+        "footer": {"text": "Platapicker · automated weekly review"},
+    }
+    return _post_webhook(webhook_url, {"embeds": [embed]})
 
 
 def _rating_color(rating: str) -> int:
