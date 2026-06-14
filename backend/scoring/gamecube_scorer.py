@@ -81,7 +81,10 @@ def _detect_condition(text: str) -> str:
 
 def _detect_console(text: str) -> bool:
     t = text.lower()
-    return "console" in t or "gamecube system" in t or "nintendo gamecube" in t
+    # Require GameCube/Nintendo context so unrelated "console"s (e.g. a console
+    # table, or an Xbox/PS2 console in a mixed estate auction) aren't counted.
+    has_gc_context = "gamecube" in t or "game cube" in t or "nintendo" in t
+    return has_gc_context and ("console" in t or "system" in t)
 
 
 def _detect_controllers(text: str) -> int:
@@ -107,6 +110,32 @@ def _detect_memory_cards(text: str) -> int:
 def _is_sports_filler(title: str) -> bool:
     t = title.lower()
     return any(kw in t for kw in SPORTS_GAME_KEYWORDS)
+
+
+def looks_like_gamecube(
+    title: str,
+    description: str = "",
+    gamecube_prices: Optional[list] = None,
+    aliases: Optional[list] = None,
+) -> bool:
+    """True if the listing references GameCube hardware or a known game title.
+
+    Used as a relevance gate so that individual game listings (e.g. "Pikmin 2"
+    or "Tales of Symphonia") that don't spell out "GameCube" in the title still
+    count as on-topic and aren't filtered out before scoring.
+    """
+    text = f"{title or ''} {description or ''}"
+    if (
+        _detect_console(text)
+        or _detect_controllers(text) > 0
+        or _detect_memory_cards(text) > 0
+    ):
+        return True
+    if gamecube_prices:
+        matched, _ = match_titles_in_text(text, gamecube_prices, aliases=aliases)
+        if matched:
+            return True
+    return False
 
 
 def score_gamecube_listing(
@@ -153,6 +182,24 @@ def score_gamecube_listing(
 
     if unmatched:
         result.warnings.append(f"{len(unmatched)} game title(s) could not be matched — manual review needed.")
+
+    # --- Relevance gate ---
+    # If there are no GameCube games (matched or even plausibly game-like) and
+    # no GameCube hardware, this isn't a GameCube listing — bail out before it
+    # can accrue any value and get rated as a deal.
+    if (
+        not matched
+        and not unmatched
+        and not has_console
+        and num_controllers == 0
+        and num_memory_cards == 0
+    ):
+        result.rating = "PASS"
+        result.score = 0
+        result.warnings.append(
+            "No GameCube games or hardware detected — filtered as off-topic."
+        )
+        return result
 
     # --- Calculate game values ---
     total_game_value = 0.0
