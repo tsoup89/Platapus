@@ -112,6 +112,32 @@ def _is_sports_filler(title: str) -> bool:
     return any(kw in t for kw in SPORTS_GAME_KEYWORDS)
 
 
+def looks_like_gamecube(
+    title: str,
+    description: str = "",
+    gamecube_prices: Optional[list] = None,
+    aliases: Optional[list] = None,
+) -> bool:
+    """True if the listing references GameCube hardware or a known game title.
+
+    Used as a relevance gate so that individual game listings (e.g. "Pikmin 2"
+    or "Tales of Symphonia") that don't spell out "GameCube" in the title still
+    count as on-topic and aren't filtered out before scoring.
+    """
+    text = f"{title or ''} {description or ''}"
+    if (
+        _detect_console(text)
+        or _detect_controllers(text) > 0
+        or _detect_memory_cards(text) > 0
+    ):
+        return True
+    if gamecube_prices:
+        matched, _ = match_titles_in_text(text, gamecube_prices, aliases=aliases)
+        if matched:
+            return True
+    return False
+
+
 def score_gamecube_listing(
     title: str,
     description: str,

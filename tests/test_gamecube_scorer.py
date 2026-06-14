@@ -3,7 +3,7 @@ import pytest
 from unittest.mock import MagicMock
 from backend.scoring.gamecube_scorer import (
     score_gamecube_listing, _detect_condition, _detect_console,
-    _detect_controllers, _is_sports_filler,
+    _detect_controllers, _is_sports_filler, looks_like_gamecube,
 )
 from backend.scoring.title_matcher import normalize_title
 
@@ -132,6 +132,19 @@ class TestScoreGamecubeListing:
             gamecube_prices=[],
         )
         assert result.rating in ("STEAL", "GREAT", "GOOD", "FAIR", "PASS")
+
+    def test_single_game_is_relevant_without_gamecube_in_title(self):
+        # Regression: a single game listing that doesn't say "GameCube" must
+        # still be recognized as on-topic so it isn't filtered out.
+        assert looks_like_gamecube(
+            "Mario Kart Double Dash", "", GC_PRICES
+        ) is True
+
+    def test_console_only_is_relevant(self):
+        assert looks_like_gamecube("Nintendo GameCube console", "") is True
+
+    def test_perfume_is_not_gamecube(self):
+        assert looks_like_gamecube("Chanel No 5 Perfume", "", GC_PRICES) is False
 
     def test_top_value_games_populated(self):
         result = score_gamecube_listing(

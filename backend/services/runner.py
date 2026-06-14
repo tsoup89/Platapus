@@ -20,7 +20,7 @@ from backend.scrapers.auctionninja import AuctionNinjaScraper
 from backend.scrapers.facebook import FacebookScraper
 from backend.scrapers.craigslist import CraigslistScraper
 from backend.scoring.deal_scorer import score_listing
-from backend.scoring.gamecube_scorer import score_gamecube_listing
+from backend.scoring.gamecube_scorer import score_gamecube_listing, looks_like_gamecube
 from backend.scoring.relevance import check_relevance
 from backend.services import discord as discord_service
 from backend.services.settings import get_all_settings
@@ -284,6 +284,15 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
         # mix the target item in with perfume, jewelry, and bric-a-brac. Drop
         # anything that doesn't match the watchlist's keywords/brands (or that
         # hits a negative keyword) before we save, score, or alert on it.
+        #
+        # GameCube is special-cased: a single-game listing (e.g. "Pikmin 2")
+        # often doesn't say "GameCube" in the title, so we also keep listings
+        # that reference known GameCube hardware or game titles. Negative
+        # keywords still apply.
+        is_gamecube = watchlist.category == "gamecube"
+        gc_prices = db.query(GameCubePrice).all() if is_gamecube else None
+        gc_aliases = watchlist.aliases if is_gamecube else None
+
         relevant_raw = []
         for item in all_raw:
             verdict = check_relevance(
@@ -293,7 +302,12 @@ def _run_one(db: Session, source: Source, watchlist: Watchlist, settings: dict):
                 brands=watchlist.brands,
                 negative_keywords=watchlist.negative_keywords,
             )
-            if verdict.relevant:
+            keep = verdict.relevant
+            if not keep and not verdict.negative_hits and is_gamecube:
+                keep = looks_like_gamecube(
+                    item.title, item.description or "", gc_prices, gc_aliases
+                )
+            if keep:
                 relevant_raw.append(item)
             else:
                 run.filtered_count += 1
