@@ -2,6 +2,7 @@
 import json
 from sqlalchemy.orm import Session
 from backend.models.models import Watchlist, Source, AppSetting, DiscordWebhook
+from backend.services.gamecube_prices import seed_prices_if_empty
 
 
 def seed_database(db: Session):
@@ -9,6 +10,9 @@ def seed_database(db: Session):
     _seed_watchlists(db)
     _seed_settings(db)
     db.commit()
+    result = seed_prices_if_empty(db)
+    if result.get("imported"):
+        print(f"✅ Imported {result['imported']} GameCube prices from sample CSV.")
     print("✅ Database seeded with default watchlists and sources.")
 
 
@@ -172,7 +176,7 @@ def _seed_settings(db: Session):
         "facebook_max_listings_per_run": 50,
         "facebook_max_searches_per_run": 5,
         "facebook_cooldown_minutes": 30,
-        "global_schedule_enabled": False,
+        "global_schedule_enabled": True,
         "global_schedule_interval_minutes": 60,
         "heartbeat_enabled": False,
         "heartbeat_discord_webhook_id": None,

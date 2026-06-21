@@ -134,69 +134,23 @@ def cmd_test_discord(webhook_url):
 
 
 @cli.command("import-gamecube-prices")
-@click.argument("csv_path")
+@click.argument("csv_path", default=None, required=False)
 def cmd_import_gamecube(csv_path):
-    """Import GameCube prices from a CSV file."""
-    import csv
-    from backend.models.models import GameCubePrice
-    from backend.scoring.title_matcher import normalize_title
-    from datetime import datetime
+    """Import GameCube prices from a CSV file (defaults to the bundled sample)."""
+    from backend.services.gamecube_prices import (
+        import_prices_from_csv, DEFAULT_SAMPLE_CSV,
+    )
+
+    csv_path = csv_path or DEFAULT_SAMPLE_CSV
 
     init_db()
     db = SessionLocal()
     try:
-        with open(csv_path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            imported = updated = 0
-            CORE_TITLES = [
-                "mario kart", "super smash bros", "mario party", "super mario sunshine",
-                "luigi's mansion", "legend of zelda", "metroid prime", "pikmin",
-                "animal crossing", "f-zero", "paper mario", "resident evil 4",
-            ]
-
-            for row in reader:
-                title = (row.get("Game") or row.get("Title") or "").strip()
-                if not title:
-                    continue
-
-                def safe_float(val):
-                    if not val or str(val).strip() in ("", "N/A", "-"):
-                        return None
-                    try:
-                        return float(str(val).replace("$", "").replace(",", "").strip())
-                    except ValueError:
-                        return None
-
-                norm = normalize_title(title)
-                existing = db.query(GameCubePrice).filter(
-                    GameCubePrice.normalized_title == norm
-                ).first()
-                is_core = any(ct in title.lower() for ct in CORE_TITLES)
-
-                if existing:
-                    existing.loose_price = safe_float(row.get("Loose Price"))
-                    existing.complete_price = safe_float(row.get("Complete Price"))
-                    existing.new_price = safe_float(row.get("New Price"))
-                    existing.graded_price = safe_float(row.get("Graded Price"))
-                    existing.last_updated = datetime.utcnow()
-                    updated += 1
-                else:
-                    gp = GameCubePrice(
-                        title=title,
-                        normalized_title=norm,
-                        loose_price=safe_float(row.get("Loose Price")),
-                        complete_price=safe_float(row.get("Complete Price")),
-                        new_price=safe_float(row.get("New Price")),
-                        graded_price=safe_float(row.get("Graded Price")),
-                        demand_tier="high" if is_core else "medium",
-                        sell_speed="fast" if is_core else "medium",
-                        core_title=is_core,
-                    )
-                    db.add(gp)
-                    imported += 1
-
-        db.commit()
-        click.echo(f"✅ Imported {imported} new titles, updated {updated} existing.")
+        result = import_prices_from_csv(db, csv_path)
+        click.echo(
+            f"✅ Imported {result['imported']} new titles, "
+            f"updated {result['updated']} existing."
+        )
     except FileNotFoundError:
         click.echo(f"❌ File not found: {csv_path}")
     finally:
